@@ -2,388 +2,367 @@
 
 ## What Problem Are We Solving?
 
-You ask Claude to do something complex: *"Build me a bedtime story app with text-to-speech."*
+When you ask Claude to "build me a sleep app", it just... builds it. Uses training data, makes reasonable choices, ships something. That's fine for simple tasks.
 
-Claude starts working. It researches TTS providers. Then it researches more. Then it finds an interesting tangent about voice synthesis. Three hours later, you have 47 pages of research and no app.
+But for complex projects - like building a story content generation system - you need a **research-to-implementation workflow**:
 
-**Or the opposite happens**: Claude picks the first TTS provider it finds, builds something quickly, and you discover later it made a poor choice that requires a rewrite.
+1. Research each component
+2. Consolidate the research
+3. Evaluate findings for your specific use case
+4. Create an implementation plan
+5. Break the plan into segments
+6. Build a test POC
+7. Execute the full plan
+8. Iterate
 
-The core tension:
+Right now, **you have to orchestrate this manually**:
 
-| Behavior | When It Helps | When It Hurts |
-|----------|---------------|---------------|
-| **Research more** | Avoids bad decisions | Can spiral forever |
-| **Decide faster** | Gets things done | Commits to bad choices |
+```
+You: "Research TTS providers for children's narration"
+Claude: [does research]
+You: "Now consolidate those findings"
+Claude: [consolidates]
+You: "Evaluate which option fits our use case"
+Claude: [evaluates]
+You: "Create an implementation plan"
+Claude: [plans]
+You: "Break that into segments"
+...
+```
 
-GOTN tries to solve this by making the tradeoff **explicit and tunable**.
+This is tedious. You're basically acting as a **workflow scheduler** and **context router** - pointing each task to the right information and deciding what comes next.
+
+**GOTN should automate this orchestration.**
 
 ---
 
-## The Core Hypothesis
+## The Core Problem: Orchestration + Context
 
-**Hypothesis**: If Claude can track *how confident* it is about each piece of work, it can make better decisions about when to research more vs. commit and build.
+Two things you're doing manually that GOTN should handle:
 
-Instead of implicit judgment ("I think I know enough"), GOTN makes it explicit:
+### 1. Workflow Orchestration
+
+You have a mental model of how research flows into implementation:
 
 ```
-Goal: Select a TTS provider
-Criteria:
-  - Voice quality is acceptable → 85% confident (tested 3 providers)
-  - Cost is under budget → 95% confident (verified pricing)
-  - API is stable → 60% confident (only read docs, no testing)
-
-Overall: 75% confident
-
-Threshold to proceed: 80%
-
-Decision: Need more research on API stability before committing
+Research → Consolidate → Evaluate → Plan → Segment → POC → Execute
 ```
 
-**Will this work?** That's the key question. It depends on:
+This isn't rigid - it's "vibes-based" and flexible. Sometimes you skip steps, sometimes you loop back. But there's a general flow.
 
-1. **Can Claude accurately self-assess confidence?** If Claude says "85% confident" but it's actually wrong 50% of the time, the whole system fails.
+**GOTN should**: Know this flow and advance through it automatically, with the flexibility to adapt.
 
-2. **Can we detect goal drift?** If a sub-task wanders off-topic, can we catch it before wasting resources?
+### 2. Context Management
 
-3. **Is the overhead worth it?** All this tracking has a cost. Is it better than just letting Claude work naturally?
+Each step needs different context:
+- Research step needs: the question, constraints, what we already know
+- Consolidation needs: all the research outputs
+- Evaluation needs: consolidated findings + your specific use case criteria
+- Planning needs: evaluation results + technical constraints
+- Execution needs: the plan segment + relevant code context
+
+Right now you're manually routing this - copy-pasting outputs, pointing Claude to the right files, reminding it of earlier decisions.
+
+**GOTN should**: Automatically route the right context to each step.
 
 ---
 
-## What GOTN Actually Does
+## What GOTN Actually Is
 
-GOTN is a **meta-layer** on top of Claude's work. Think of it as a project manager that:
+GOTN is a **workflow orchestrator with context management** for research-to-implementation flows.
 
-1. **Tracks goals** - What are we trying to achieve?
-2. **Tracks confidence** - How sure are we about each piece?
-3. **Enforces thresholds** - Don't commit until confidence is high enough
-4. **Prevents drift** - Make sure sub-tasks relate to the parent goal
-5. **Knows when to stop** - Budget limits prevent infinite research
+It's NOT:
+- A "discipline layer" to stop Claude from over-researching (Claude doesn't over-research unprompted)
+- A complex confidence/threshold system (overkill for most cases)
+- A replacement for Claude's judgment
 
-### The WorkNode: One Universal Abstraction
+It IS:
+- A way to define repeatable workflows
+- A context router that connects steps
+- A state tracker so you can pause/resume
+- A way to parallelize independent research
 
-Everything in GOTN is a **WorkNode**. Whether you're researching, building, or deciding, it's the same structure:
+### The Workflow Model
 
-```
-WorkNode:
-  goal: "What are we trying to do?"
-  criteria: "How do we know we succeeded?"
-  confidence: "How sure are we?" (0-100%)
-  threshold: "How sure do we need to be?" (e.g., 80%)
-  budget: "How much time/effort can we spend?"
-  children: "What sub-tasks did we spawn?"
-```
-
-The insight: **questions and tasks are the same thing** at different abstraction levels.
-
-```
-Question: "What TTS provider should we use?"
-     ↓ reframe
-Task: "Achieve 80% confidence in TTS provider selection"
-     ↓ with criteria
-- Voice quality meets needs (test samples)
-- Cost within budget (verify pricing)
-- API is reliable (test integration)
-```
-
-### The Four Modes
-
-WorkNodes come in four flavors, based on what they produce:
-
-| Mode | Purpose | Output |
-|------|---------|--------|
-| **Epistemic** | Learn something | Knowledge (claims + confidence) |
-| **Instrumental** | Build something | Artifact (code, content, config) |
-| **Decision** | Commit to something | Binding choice + rationale |
-| **Validation** | Verify something | Pass/fail + evidence |
-
-**The key insight**: Research (epistemic) nodes must eventually lead to Decision nodes. You can't research forever—at some point you have to commit and build.
-
-```
-[Research TTS options] → [Evaluate Provider A] → [Evaluate Provider B]
-                                    ↓                      ↓
-                              [DECISION: Pick Provider A]
-                                    ↓
-                              [Build integration]
-```
-
-The Decision node is a **shipping gate**—it forces you to stop learning and start doing.
-
----
-
-## How It Relates to Claude Code
-
-Here's the honest question: **Do we need GOTN, or can Claude Code already do this?**
-
-Claude Code already has:
-- **Task agents** for delegation
-- **Deep research skill** for thorough investigation
-- **TodoWrite** for tracking progress
-- **AskUserQuestion** for human-in-the-loop
-
-So what does GOTN add?
-
-| Capability | Claude Code | GOTN Adds |
-|------------|-------------|-----------|
-| Research | Deep research skill | **Confidence tracking** - know when you've researched "enough" |
-| Delegation | Task agents | **Goal alignment** - ensure sub-tasks serve the parent goal |
-| Progress | TodoWrite | **State machine** - formal lifecycle with clear transitions |
-| HITL | AskUserQuestion | **Escalation policies** - know *when* to ask based on confidence |
-| Budget | Timeout flags | **Resource tracking** - tokens, time, steps with enforcement |
-
-**The case for GOTN**: Claude Code gives you the tools, but GOTN gives you the *discipline*. It's the difference between having a hammer and having a construction plan.
-
-**The case against GOTN**: Maybe the overhead isn't worth it. Maybe Claude's natural judgment is good enough for most tasks, and formal tracking just adds friction.
-
-### Potential Simplification
-
-Instead of bespoke Python code, we could implement GOTN as:
-- A **Claude Code skill** that enforces the discipline
-- Using **existing tools** (Task, TodoWrite, AskUserQuestion) under the hood
-- With a **simple state file** (YAML/JSON) tracking goals and confidence
-
-The question is whether the formal structure helps or hinders.
-
----
-
-## The Confidence Model (Critical Component)
-
-This is where GOTN succeeds or fails. The entire system depends on confidence scores being meaningful.
-
-### How Confidence Works
-
-Each criterion on a goal has its own confidence:
+A workflow is a sequence of **phases**, each with a type:
 
 ```yaml
-goal: "Select TTS provider"
-criteria:
-  - description: "Voice quality acceptable"
-    confidence: 0.85
-    evidence: ["Tested 3 providers", "User feedback positive"]
+workflow: "research-to-implementation"
+phases:
+  - name: "Research"
+    type: epistemic
+    parallel: true  # Can research multiple things at once
 
-  - description: "Cost within budget"
-    confidence: 0.95
-    evidence: ["Verified pricing docs", "Calculated monthly cost"]
+  - name: "Consolidate"
+    type: epistemic
+    inputs: [Research.*]  # Gets all research outputs
 
-  - description: "API stable"
-    confidence: 0.60
-    evidence: ["Read documentation"]  # No actual testing
+  - name: "Evaluate"
+    type: decision
+    inputs: [Consolidate, use_case_criteria]
+
+  - name: "Plan"
+    type: epistemic
+    inputs: [Evaluate]
+
+  - name: "Segment"
+    type: epistemic
+    inputs: [Plan]
+
+  - name: "POC"
+    type: instrumental
+    inputs: [Segment[0]]  # Just the first segment
+
+  - name: "Execute"
+    type: instrumental
+    inputs: [Segment, POC.learnings]
+    parallel: true  # Can execute segments in parallel
 ```
 
-### Aggregation
+### Phase Types
 
-The overall confidence combines criteria, with **must-pass** criteria acting as a floor:
+| Type | Purpose | What It Produces |
+|------|---------|------------------|
+| **Epistemic** | Learn/research | Findings, summaries, options |
+| **Decision** | Evaluate and commit | A choice with rationale |
+| **Instrumental** | Build something | Artifacts (code, content) |
+| **Validation** | Test something | Pass/fail with evidence |
 
+### Context Routing
+
+Each phase declares its **inputs** - what context it needs. GOTN automatically:
+1. Collects outputs from the specified phases
+2. Formats them appropriately
+3. Passes them to the executing agent
+
+```yaml
+# Evaluate phase gets:
+# - The consolidated research (Consolidate output)
+# - The use case criteria (from config or user input)
+
+- name: "Evaluate"
+  inputs:
+    - Consolidate           # Output from previous phase
+    - use_case_criteria     # Config value or file reference
 ```
-must_pass criteria → use MINIMUM (if any fails, overall fails)
-optional criteria → use WEIGHTED AVERAGE
-
-Example:
-  must_pass: [voice_quality: 0.85, cost: 0.95] → min = 0.85
-  optional: [api_stability: 0.60, docs: 0.90] → avg = 0.75
-
-  overall = 0.6 * must_pass_min + 0.4 * optional_avg
-          = 0.6 * 0.85 + 0.4 * 0.75
-          = 0.81
-```
-
-### The Calibration Problem
-
-**This is the biggest risk.** If Claude says "85% confident" but is actually right only 60% of the time, the thresholds become meaningless.
-
-Ways to address this:
-1. **Evidence requirements** - Confidence must be backed by specific evidence
-2. **Validation nodes** - Explicitly test claims before proceeding
-3. **Calibration feedback** - Track historical accuracy and adjust
 
 ---
 
-## Goal Alignment (Preventing Drift)
+## How It Works with Claude Code
 
-The second critical component. When you spawn sub-tasks, they can drift away from the original goal.
+GOTN doesn't replace Claude Code - it orchestrates it.
 
-**Example of drift:**
 ```
-Root: "Build a bedtime story app"
-  └── "Research TTS providers"
-       └── "Understand voice synthesis technology"
-            └── "Study acoustic phonetics"  ← DRIFT! Not helping build the app
+GOTN Orchestrator
+    ↓
+    ├── Phase: Research TTS
+    │   └── [Claude Code: deep-research skill]
+    │
+    ├── Phase: Research Voice Styles
+    │   └── [Claude Code: deep-research skill]
+    │
+    ├── Phase: Consolidate
+    │   └── [Claude Code: summarization task]
+    │
+    ├── Phase: Evaluate
+    │   └── [Claude Code: analysis task]
+    │
+    └── Phase: Execute
+        └── [Claude Code: implementation task]
 ```
 
-### How Alignment Works
+Each phase invokes Claude Code with:
+- The phase goal
+- The routed context (inputs from previous phases)
+- Any phase-specific tools or skills
 
-Before spawning a child node, GOTN checks if the child goal relates to the parent and root goals.
+### Tool Selection by Phase Type
 
-**Current implementation**: Keyword matching with concept expansion
-- "TTS" relates to "voice", "speech", "audio"
-- "authentication" relates to "JWT", "OAuth", "login"
-
-**Limitation**: Keyword matching is crude. Semantic embeddings would be better but add complexity.
-
-**The question**: Is simple keyword matching good enough, or do we need more sophisticated NLP?
+| Phase Type | Default Tools |
+|------------|---------------|
+| Epistemic | deep-research, web-search, Explore |
+| Decision | triad-orchestrator (multi-model), analysis |
+| Instrumental | code tools, file operations |
+| Validation | test runners, verification tools |
 
 ---
 
-## The Lifecycle (State Machine)
+## Minimal Implementation
 
-Every WorkNode follows the same lifecycle:
+The simplest GOTN could be a **Claude Code skill** that:
 
+1. Reads a workflow definition (YAML file)
+2. Tracks current phase in a state file
+3. Routes context between phases
+4. Advances to next phase when current completes
+
+```yaml
+# .gotn/workflow.yaml
+name: "NES Story Generation"
+phases:
+  - research-tts
+  - research-story-structure
+  - consolidate
+  - evaluate
+  - plan
+  - execute
+
+# .gotn/state.yaml
+current_phase: "consolidate"
+completed:
+  research-tts: "outputs/research-tts.md"
+  research-story-structure: "outputs/research-story.md"
 ```
-PENDING → READY → RUNNING → COMPLETE
-                    ↓
-                 BLOCKED (waiting for children)
-                    ↓
-                 RUNNING (children done)
-                    ↓
-           COMPLETE / DEGRADED / ESCALATED / FAILED
-```
 
-### Key States
-
-| State | Meaning |
-|-------|---------|
-| **PENDING** | Created but dependencies not met |
-| **READY** | Dependencies met, waiting to execute |
-| **RUNNING** | Actively working |
-| **BLOCKED** | Spawned children, waiting for them |
-| **COMPLETE** | Confidence threshold met |
-| **DEGRADED** | Budget exhausted, partial output |
-| **ESCALATED** | Needs human decision |
-| **FAILED** | Unrecoverable error |
-
-### Why a Formal State Machine?
-
-It might seem like overkill, but the state machine provides:
-- **Clear invariants** - You can't be RUNNING without dependencies met
-- **Deterministic transitions** - Same inputs always produce same state
-- **Debuggability** - Can trace exactly how a node reached its state
+The skill would:
+1. Read state to know where we are
+2. Gather inputs for current phase
+3. Execute the phase (using Claude Code tools)
+4. Save outputs
+5. Advance state
+6. Repeat or pause for human input
 
 ---
 
-## Shipping Gates (Forcing Decisions)
+## What About Confidence and Alignment?
 
-**Problem**: Research can spiral forever. There's always more to learn.
+These might still be useful, but they're **secondary features**, not the core:
 
-**Solution**: Every research branch must terminate in a **Decision node**.
+**Confidence tracking**: Useful for knowing when a research phase has "enough" information to move on. But can be simple - "do I have answers to my key questions?" rather than numerical thresholds.
 
-```
-[Research] → [Research] → [Research] → [DECISION] → [Build]
-```
+**Goal alignment**: Useful for catching when parallel research tasks drift. But can be lightweight - just checking that outputs relate to the workflow goal.
 
-The Decision node is a **shipping gate**. It forces you to:
-1. Stop gathering information
-2. Commit to a choice
-3. Document the rationale
-4. Acknowledge residual risks
+**Shipping gates**: The Decision phases already serve this purpose - they force you to commit before moving to implementation.
 
-**Why this matters**: Without shipping gates, you can have 100 research nodes with no output. The gate ensures research serves a purpose.
+These can be added incrementally if the basic orchestration proves valuable.
 
 ---
 
-## Resource Limits (Circuit Breakers)
+## Example: NES Story Content Workflow
 
-Prevent runaway behavior:
+Here's how your actual workflow might look:
 
-```python
-MAX_DEPTH = 5           # No more than 5 levels of nesting
-MAX_NODES = 200         # No more than 200 nodes per tree
-MAX_EPISTEMIC = 0.4     # No more than 40% research nodes
+```yaml
+name: "NES Story Content Generation"
+
+context:
+  project: "Interactive bedtime stories for children"
+  constraints:
+    - "Age-appropriate content (3-8 years)"
+    - "Must work offline after initial load"
+    - "Voice narration required"
+
+phases:
+  - name: "Research TTS Options"
+    type: epistemic
+    goal: "Find TTS providers suitable for children's content"
+    parallel_with: ["Research Story Structures"]
+
+  - name: "Research Story Structures"
+    type: epistemic
+    goal: "Understand interactive story formats for children"
+
+  - name: "Consolidate Research"
+    type: epistemic
+    inputs: ["Research TTS Options", "Research Story Structures"]
+    goal: "Synthesize findings into coherent options"
+
+  - name: "Evaluate for Use Case"
+    type: decision
+    inputs: ["Consolidate Research", "context.constraints"]
+    goal: "Select TTS provider and story format"
+    outputs:
+      - tts_choice
+      - story_format
+      - rationale
+
+  - name: "Implementation Plan"
+    type: epistemic
+    inputs: ["Evaluate for Use Case"]
+    goal: "Create detailed implementation plan"
+
+  - name: "Segment Plan"
+    type: epistemic
+    inputs: ["Implementation Plan"]
+    goal: "Break into independently testable segments"
+    outputs:
+      - segments[]  # Array of segments
+
+  - name: "POC"
+    type: instrumental
+    inputs: ["Segment Plan.segments[0]"]
+    goal: "Build minimal working proof of concept"
+
+  - name: "Execute Segments"
+    type: instrumental
+    inputs: ["Segment Plan.segments", "POC.learnings"]
+    goal: "Implement remaining segments"
+    parallel: true
 ```
 
-**Why these exist**: Without limits, a malformed goal or edge case could spawn infinite nodes. The limits provide a safety net.
+Running this:
 
----
+```bash
+gotn run nes-story-workflow.yaml
 
-## Will It Actually Work?
-
-### Reasons for Optimism
-
-1. **Structure helps** - Having explicit criteria and thresholds forces clearer thinking
-2. **Confidence is useful** - Even imperfect confidence tracking is better than none
-3. **Alignment catches errors** - Even crude drift detection catches obvious mistakes
-4. **Shipping gates work** - Forcing decisions prevents analysis paralysis
-
-### Reasons for Skepticism
-
-1. **Overhead** - All this tracking might slow things down without adding value
-2. **Calibration** - If confidence isn't calibrated, thresholds are meaningless
-3. **Complexity** - More code means more bugs and maintenance
-4. **Duplication** - Claude Code already handles much of this implicitly
-
-### What Would Prove It Works?
-
-1. **Complex task completion** - Can GOTN complete a multi-step project that Claude alone would fumble?
-2. **Appropriate escalation** - Does it ask for help at the right times?
-3. **No infinite loops** - Does it actually stop researching when appropriate?
-4. **Goal coherence** - Do all sub-tasks actually contribute to the root goal?
+# GOTN executes each phase, routing context automatically
+# You can pause/resume at any point
+# Parallel phases run concurrently
+```
 
 ---
 
 ## Implementation Options
 
-### Option A: Full Python Implementation (Current)
+### Option A: Claude Code Skill (Simplest)
 
-```
-gotn/
-├── node.py       # WorkNode data model
-├── state.py      # State machine
-├── scheduler.py  # DAG execution
-├── executor.py   # Claude subprocess
-├── alignment.py  # Goal drift detection
-├── confidence.py # Confidence aggregation
-└── cli.py        # Command interface
-```
+A skill file that implements the orchestration loop. State lives in YAML files in the project.
 
-**Pros**: Full control, testable, explicit
-**Cons**: Lots of code to maintain, might duplicate Claude Code
+**Pros**: No external dependencies, uses existing Claude Code tools
+**Cons**: Limited parallelism, skill-based state management can be fragile
 
-### Option B: Claude Code Skill (Lighter)
+### Option B: Lightweight Python CLI
 
-A single skill file that:
-- Uses TodoWrite for tracking
-- Uses Task for delegation
-- Uses AskUserQuestion for HITL
-- Maintains state in a simple YAML file
+A Python CLI that:
+- Parses workflow definitions
+- Manages state (SQLite or YAML)
+- Invokes Claude Code for each phase
+- Routes context
 
-**Pros**: Leverages existing tools, less code
-**Cons**: Less control, harder to test
+**Pros**: Better state management, easier parallelism, testable
+**Cons**: Separate tool to install/run
 
-### Option C: Hybrid
+### Option C: Current Implementation (Overkill?)
 
-Use GOTN for the meta-layer (goals, confidence, alignment) but delegate execution to Claude Code's existing tools.
+The full Python package with state machines, confidence aggregation, alignment scoring, etc.
 
-**Pros**: Best of both worlds
-**Cons**: Integration complexity
+**Pros**: Full featured
+**Cons**: Lots of code for features that might not be needed
+
+**Recommendation**: Start with Option A or B. Add complexity only if the basic orchestration proves valuable.
 
 ---
 
-## Next Steps to Validate
+## Key Questions to Answer
 
-1. **Test confidence calibration** - Give Claude tasks with known answers, measure accuracy of confidence scores
+1. **Is workflow definition worth it?** Or is ad-hoc orchestration actually fine?
 
-2. **Test goal alignment** - Deliberately try to drift off-topic, see if detection catches it
+2. **How much context routing is needed?** Is "just pass all previous outputs" good enough, or do we need precise routing?
 
-3. **Test shipping gates** - Create research-heavy tasks, verify they eventually produce decisions
+3. **Where should state live?** Files in the project? Separate database?
 
-4. **Compare to baseline** - Same task with and without GOTN, measure quality and efficiency
+4. **How to handle parallelism?** Run multiple Claude instances? Or just sequential with async potential?
 
-5. **Simplification experiment** - Try Option B (pure skill), compare to Option A (Python)
+5. **What's the right granularity?** Are "phases" the right unit, or should it be more/less granular?
 
 ---
 
 ## Summary
 
-GOTN is a hypothesis: **explicit confidence tracking and goal alignment will help Claude work autonomously on complex tasks**.
+**The real problem**: You have to manually orchestrate research-to-implementation workflows, acting as scheduler and context router.
 
-The system adds:
-- Structured goal tracking with criteria
-- Confidence scores with thresholds
-- Goal alignment validation
-- Shipping gates to force decisions
-- Resource limits to prevent runaway
+**GOTN should be**: A workflow orchestrator that automates this - defining flows, routing context, tracking state, invoking Claude Code for each step.
 
-Whether this is better than just using Claude Code directly is an open question. The value depends on:
-- How well confidence scores calibrate
-- How much the structure helps vs. hinders
-- Whether the complexity is worth the discipline
+**The confidence/alignment/threshold stuff**: Secondary features that can be added if basic orchestration proves valuable.
 
-The best way to find out is to try it on real tasks and measure.
+**Next step**: Try the simplest implementation (Option A or B) on a real workflow and see if it actually helps.
