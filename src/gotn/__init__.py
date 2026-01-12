@@ -1,0 +1,30 @@
+"""GOTN - Goal-Oriented Task Network.
+
+Recursive workflow orchestration for LLM agents.
+"""
+
+__version__ = "0.1.0"
+
+from gotn.node import (
+    WorkNode,
+    Goal,
+    Criterion,
+    Budget,
+    ResourceUsage,
+    Claim,
+    Evidence,
+    NodeStatus,
+    NodeMode,
+)
+
+__all__ = [
+    "WorkNode",
+    "Goal",
+    "Criterion",
+    "Budget",
+    "ResourceUsage",
+    "Claim",
+    "Evidence",
+    "NodeStatus",
+    "NodeMode",
+]

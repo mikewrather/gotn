@@ -299,10 +299,10 @@ def handle_budget_exhaustion(node: WorkNode) -> None:
 ## 6. Global Circuit Breakers
 
 ### Problem
-Recursive spawning can create runaway node growth.
+Recursive spawning can create runaway node growth and resource exhaustion.
 
 ### Solution
-Global limits that halt the system before resource exhaustion.
+Global limits that halt the system before resource exhaustion, with scheduler integration for concurrency control.
 
 ```python
 GLOBAL_LIMITS = {
@@ -317,7 +317,13 @@ def check_global_limits(root: WorkNode) -> list[Violation]:
     """Check all global constraints."""
 
     violations = []
-    all_nodes = get_all_descendants(root)
+
+    # Include root in descendants to avoid empty list errors
+    all_nodes = [root] + get_all_descendants(root)
+
+    # Guard against empty graph
+    if not all_nodes:
+        return violations
 
     # Depth check
     max_depth = max(n.depth for n in all_nodes)
@@ -328,13 +334,78 @@ def check_global_limits(root: WorkNode) -> list[Violation]:
     if len(all_nodes) > GLOBAL_LIMITS['MAX_NODES_PER_ROOT']:
         violations.append(Violation('MAX_NODES_PER_ROOT', len(all_nodes)))
 
-    # Epistemic ratio check
-    epistemic_count = sum(1 for n in all_nodes if n.mode == 'epistemic')
-    ratio = epistemic_count / len(all_nodes)
-    if ratio > GLOBAL_LIMITS['MAX_EPISTEMIC_RATIO']:
-        violations.append(Violation('MAX_EPISTEMIC_RATIO', ratio))
+    # Epistemic ratio check (guard against division by zero)
+    if len(all_nodes) > 0:
+        epistemic_count = sum(1 for n in all_nodes if n.mode == 'epistemic')
+        ratio = epistemic_count / len(all_nodes)
+        if ratio > GLOBAL_LIMITS['MAX_EPISTEMIC_RATIO']:
+            violations.append(Violation('MAX_EPISTEMIC_RATIO', ratio))
+
+    # Concurrent execution check
+    running_count = sum(1 for n in all_nodes if n.status == 'running')
+    if running_count > GLOBAL_LIMITS['MAX_CONCURRENT_NODES']:
+        violations.append(Violation('MAX_CONCURRENT_NODES', running_count))
 
     return violations
+
+
+class ConcurrencyScheduler:
+    """Manages concurrent node execution within global limits."""
+
+    def __init__(self, max_concurrent: int = GLOBAL_LIMITS['MAX_CONCURRENT_NODES']):
+        self.max_concurrent = max_concurrent
+        self.running_nodes: set[str] = set()
+        self.ready_queue: PriorityQueue[WorkNode] = PriorityQueue()
+        self._lock = threading.Lock()
+
+    def can_start(self, node: WorkNode) -> bool:
+        """Check if a node can start execution."""
+        with self._lock:
+            return len(self.running_nodes) < self.max_concurrent
+
+    def request_start(self, node: WorkNode) -> bool:
+        """Request to start a node. Returns True if granted."""
+        with self._lock:
+            if len(self.running_nodes) >= self.max_concurrent:
+                # Queue for later
+                priority = self._calculate_priority(node)
+                self.ready_queue.put((priority, node))
+                return False
+
+            self.running_nodes.add(node.id)
+            return True
+
+    def on_node_complete(self, node: WorkNode) -> Optional[WorkNode]:
+        """Called when a node finishes. Returns next node to start, if any."""
+        with self._lock:
+            self.running_nodes.discard(node.id)
+
+            # Start next queued node if available
+            if not self.ready_queue.empty():
+                _, next_node = self.ready_queue.get()
+                self.running_nodes.add(next_node.id)
+                return next_node
+            return None
+
+    def _calculate_priority(self, node: WorkNode) -> int:
+        """Lower number = higher priority."""
+        # Prioritize: decision > instrumental > validation > epistemic
+        MODE_PRIORITY = {
+            'decision': 0,      # Shipping gates first
+            'instrumental': 1,  # Build work second
+            'validation': 2,    # Verification third
+            'epistemic': 3,     # Research last (can spiral)
+        }
+        base = MODE_PRIORITY.get(node.mode, 99)
+
+        # Boost priority for nodes close to completion
+        if node.confidence.aggregate >= 0.7:
+            base -= 1
+
+        # Penalize deep nodes (prefer breadth)
+        base += node.depth
+
+        return base
 
 
 def enforce_circuit_breaker(violations: list[Violation]) -> None:
@@ -355,43 +426,54 @@ def enforce_circuit_breaker(violations: list[Violation]) -> None:
 ## 7. Cycle Detection
 
 ### Problem
-DAG edges could inadvertently create cycles, causing infinite loops.
+DAG edges could inadvertently create cycles, causing infinite loops or deadlocks.
 
 ### Solution
-Validate DAG structure on every edge addition.
+Validate DAG structure on every edge addition. Check both `depends_on` and `blocks` edges since both can create blocking cycles.
 
 ```python
+# Edge types that can create blocking cycles
+BLOCKING_EDGE_TYPES = {'depends_on', 'blocks'}
+
+
 def add_edge(source: WorkNode, target: WorkNode, edge_type: EdgeType) -> bool:
     """Add edge with cycle detection."""
 
     # Temporarily add edge
     source.edges.append(TypedEdge(target=target.id, type=edge_type))
 
-    # Check for cycles using DFS
-    if has_cycle(get_root(source)):
-        # Rollback
-        source.edges.pop()
-        log_error(f"Cycle detected: {source.id} -> {target.id}")
-        return False
+    # Check for cycles in blocking edges
+    if edge_type in BLOCKING_EDGE_TYPES:
+        if has_cycle(get_root(source)):
+            # Rollback
+            source.edges.pop()
+            log_error(f"Cycle detected: {source.id} -> {target.id}")
+            return False
 
     return True
 
 
 def has_cycle(root: WorkNode) -> bool:
-    """Detect cycles using DFS with coloring."""
+    """Detect cycles using DFS with coloring.
 
+    Checks both depends_on and blocks edges since both can create deadlocks.
+    """
     WHITE, GRAY, BLACK = 0, 1, 2
-    color = {n.id: WHITE for n in get_all_descendants(root)}
+
+    # Include root in the graph
+    all_nodes = [root] + get_all_descendants(root)
+    color = {n.id: WHITE for n in all_nodes}
 
     def dfs(node_id: str) -> bool:
         color[node_id] = GRAY
 
         node = get_node(node_id)
         for edge in node.edges:
-            if edge.type == 'depends_on':  # Only check blocking edges
-                if color[edge.target] == GRAY:
+            # Check ALL blocking edge types, not just depends_on
+            if edge.type in BLOCKING_EDGE_TYPES:
+                if color.get(edge.target) == GRAY:
                     return True  # Back edge = cycle
-                if color[edge.target] == WHITE:
+                if color.get(edge.target) == WHITE:
                     if dfs(edge.target):
                         return True
 
@@ -407,93 +489,172 @@ def has_cycle(root: WorkNode) -> bool:
 Similar research questions get asked multiple times, wasting resources.
 
 ### Solution
-Cache research findings indexed by semantic similarity.
+Cache research findings using hierarchical lookup: L1 exact-match (fast hash), L2 semantic similarity (embeddings). Both goal statement AND context fingerprint are included to prevent cross-context contamination.
 
 ```python
 class SemanticCache:
-    def __init__(self):
-        self.embeddings = {}  # goal_hash -> embedding
-        self.claims = {}      # goal_hash -> list[Claim]
+    """Hierarchical cache with L1 exact-match and L2 semantic similarity."""
 
-    def get_cache_key(self, goal: Goal, context: Context) -> str:
-        """Generate cache key from goal + context."""
+    def __init__(self, vector_store: VectorStore = None):
+        # L1: Exact match cache (fast path)
+        self.exact_cache: dict[str, CacheEntry] = {}
+
+        # L2: Semantic similarity via vector store
+        # Use HNSW index for O(log N) retrieval instead of O(N) linear scan
+        self.vector_store = vector_store or InMemoryVectorStore()
+
+    def get_exact_key(self, goal: Goal, context: Context) -> str:
+        """Generate exact-match cache key from goal + context."""
         content = f"{goal.statement}|{context.fingerprint}"
         return hashlib.sha256(content.encode()).hexdigest()
 
-    def find_similar(
+    def find(
         self,
         goal: Goal,
         context: Context,
-        threshold: float = 0.9
+        similarity_threshold: float = 0.9
     ) -> Optional[list[Claim]]:
-        """Find cached claims for similar goals."""
+        """Find cached claims using hierarchical lookup."""
 
-        query_embedding = embed(goal.statement)
+        # L1: Try exact match first (fast path, no embedding needed)
+        exact_key = self.get_exact_key(goal, context)
+        if exact_key in self.exact_cache:
+            entry = self.exact_cache[exact_key]
+            valid_claims = self._filter_valid_claims(entry.claims)
+            if valid_claims:
+                return valid_claims
+            else:
+                # All claims expired, remove entry
+                del self.exact_cache[exact_key]
 
-        for key, cached_embedding in self.embeddings.items():
-            similarity = cosine_similarity(query_embedding, cached_embedding)
-            if similarity >= threshold:
-                claims = self.claims.get(key, [])
-                # Check expiry
-                valid_claims = [c for c in claims if not is_expired(c)]
-                if valid_claims:
-                    return valid_claims
+        # L2: Semantic similarity search (slower path)
+        # CRITICAL FIX: Include context fingerprint in embedding to prevent
+        # cross-context contamination
+        query_text = f"{goal.statement} [context:{context.fingerprint}]"
+        query_embedding = embed(query_text)
+
+        # Use vector store for O(log N) approximate nearest neighbor search
+        candidates = self.vector_store.search(
+            query_embedding,
+            k=5,  # Top 5 candidates
+            threshold=similarity_threshold
+        )
+
+        for candidate in candidates:
+            # Additional context compatibility check
+            if not self._contexts_compatible(context, candidate.context):
+                continue
+
+            valid_claims = self._filter_valid_claims(candidate.claims)
+            if valid_claims:
+                return valid_claims
 
         return None
 
     def store(self, goal: Goal, context: Context, claims: list[Claim]) -> None:
         """Cache claims for future reuse."""
-        key = self.get_cache_key(goal, context)
-        self.embeddings[key] = embed(goal.statement)
-        self.claims[key] = claims
+        exact_key = self.get_exact_key(goal, context)
+
+        # Store in L1 exact cache
+        entry = CacheEntry(
+            goal=goal,
+            context=context,
+            claims=claims,
+            stored_at=now()
+        )
+        self.exact_cache[exact_key] = entry
+
+        # Store in L2 vector store
+        # Include context in embedding for proper similarity matching
+        text = f"{goal.statement} [context:{context.fingerprint}]"
+        embedding = embed(text)
+        self.vector_store.add(
+            id=exact_key,
+            embedding=embedding,
+            metadata=entry
+        )
+
+    def _filter_valid_claims(self, claims: list[Claim]) -> list[Claim]:
+        """Filter out expired claims and apply recency decay."""
+        valid = []
+        for claim in claims:
+            if is_expired(claim):
+                continue
+            # Apply domain-specific recency decay
+            decayed_confidence = apply_recency_decay(claim)
+            if decayed_confidence >= 0.1:  # Minimum useful confidence
+                claim_copy = claim.copy()
+                claim_copy.confidence = decayed_confidence
+                valid.append(claim_copy)
+        return valid
+
+    def _contexts_compatible(self, query_ctx: Context, cached_ctx: Context) -> bool:
+        """Check if cached context is compatible with query context."""
+        # Same project/domain required
+        if query_ctx.project_id != cached_ctx.project_id:
+            return False
+        # Check for invalidating changes in context
+        if query_ctx.version > cached_ctx.version:
+            # Context has evolved; check if changes affect cached claims
+            if query_ctx.breaking_changes_since(cached_ctx.version):
+                return False
+        return True
+
+
+@dataclass
+class CacheEntry:
+    goal: Goal
+    context: Context
+    claims: list[Claim]
+    stored_at: Timestamp
+
+
+def apply_recency_decay(claim: Claim) -> float:
+    """Reduce confidence based on age and domain-specific decay rates."""
+    if not hasattr(claim, 'domain') or claim.domain is None:
+        domain = 'general'
+    else:
+        domain = claim.domain
+
+    # Domain-specific half-life in days
+    DECAY_RATES = {
+        'api_documentation': 90,    # Stale after ~90 days
+        'academic_research': 730,   # Stale after ~2 years
+        'market_data': 30,          # Stale after ~30 days
+        'experiment_result': 180,   # Stale after ~6 months
+        'configuration': 60,        # Stale after ~60 days
+        'user_preference': 365,     # Stale after ~1 year
+        'general': 180,             # Default: 6 months
+    }
+
+    # Get evidence recency from claim's supporting evidence
+    evidence_age_days = get_evidence_age_days(claim)
+    half_life = DECAY_RATES.get(domain, 180)
+    decay_factor = 0.5 ** (evidence_age_days / half_life)
+
+    return claim.confidence * decay_factor
 ```
 
 ## Summary: Mechanism Interaction
 
-```
-                    ┌─────────────────┐
-                    │   New WorkNode  │
-                    └────────┬────────┘
-                             │
-                    ┌────────▼────────┐
-                    │ Check Semantic  │
-                    │     Cache       │
-                    └────────┬────────┘
-                             │
-              HIT ───────────┼─────────── MISS
-                │            │              │
-                ▼            │              ▼
-         Return cached       │      ┌──────────────┐
-           claims            │      │ Check Global │
-                             │      │   Limits     │
-                             │      └──────┬───────┘
-                             │             │
-                             │    VIOLATION ┼ OK
-                             │        │     │
-                             │        ▼     ▼
-                             │   Escalate   │
-                             │              │
-                             │      ┌───────▼───────┐
-                             │      │ Execute Node  │
-                             │      │ (with budget) │
-                             │      └───────┬───────┘
-                             │              │
-                             │      ┌───────▼───────┐
-                             │      │  Aggregate    │
-                             │      │  Confidence   │
-                             │      └───────┬───────┘
-                             │              │
-                             │      ┌───────▼───────┐
-                             │      │  Autonomy     │
-                             │      │  Decision     │
-                             │      └───────┬───────┘
-                             │              │
-              ┌──────────────┼──────────────┼──────────────┐
-              │              │              │              │
-              ▼              ▼              ▼              ▼
-          PROCEED      SPAWN RESEARCH   ESCALATE      DEGRADE
-              │              │              │              │
-              ▼              ▼              ▼              ▼
-         Complete      VOI Check →     HITL Request   Min Viable
-                       Create Nodes                    Output
+```mermaid
+flowchart TB
+    NewNode["New WorkNode"] --> CacheCheck{"Check Semantic Cache"}
+
+    CacheCheck -->|HIT| ReturnCached["Return cached claims"]
+    CacheCheck -->|MISS| LimitCheck{"Check Global Limits"}
+
+    LimitCheck -->|VIOLATION| Escalate1["Escalate"]
+    LimitCheck -->|OK| Execute["Execute Node<br/>(with budget)"]
+
+    Execute --> Aggregate["Aggregate Confidence"]
+    Aggregate --> Autonomy{"Autonomy Decision"}
+
+    Autonomy -->|PROCEED| Complete["Complete"]
+    Autonomy -->|SPAWN RESEARCH| VOI{"VOI Check"}
+    Autonomy -->|ESCALATE| HITL["HITL Request"]
+    Autonomy -->|DEGRADE| MinViable["Min Viable Output"]
+
+    VOI -->|positive| CreateNodes["Create child nodes"]
+    VOI -->|negative| MinViable
 ```
