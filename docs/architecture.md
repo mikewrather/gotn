@@ -1,702 +1,389 @@
 # GOTN Architecture
 
-## Overview
+## What Problem Are We Solving?
 
-Goal-Oriented Task Network (GOTN) is a recursive workflow orchestration model that unifies knowledge acquisition and artifact production under a single abstraction: the **WorkNode**.
+You ask Claude to do something complex: *"Build me a bedtime story app with text-to-speech."*
 
-## The Core Problem
+Claude starts working. It researches TTS providers. Then it researches more. Then it finds an interesting tangent about voice synthesis. Three hours later, you have 47 pages of research and no app.
 
-Traditional workflow systems face a tension:
+**Or the opposite happens**: Claude picks the first TTS provider it finds, builds something quickly, and you discover later it made a poor choice that requires a rewrite.
 
-| Approach | Strength | Weakness |
-|----------|----------|----------|
-| **Question-driven** | Good for research/discovery | Doesn't encode outcomes; can spiral infinitely |
-| **Objective-driven** | Good for delivery | Assumes you know what to build; brittle to unknowns |
+The core tension:
 
-Real-world projects require both: you need to **learn** things to **build** things, and building reveals what you still need to learn.
+| Behavior | When It Helps | When It Hurts |
+|----------|---------------|---------------|
+| **Research more** | Avoids bad decisions | Can spiral forever |
+| **Decide faster** | Gets things done | Commits to bad choices |
 
-## The Solution: Unified WorkNode
+GOTN tries to solve this by making the tradeoff **explicit and tunable**.
 
-GOTN resolves this by recognizing that questions and objectives are the same thing at different abstraction levels:
+---
+
+## The Core Hypothesis
+
+**Hypothesis**: If Claude can track *how confident* it is about each piece of work, it can make better decisions about when to research more vs. commit and build.
+
+Instead of implicit judgment ("I think I know enough"), GOTN makes it explicit:
 
 ```
-"What TTS provider should we use?"
-    ↓ reframe as objective
-"Determine optimal TTS provider for children's narration"
-    ↓ with success criteria
-"Achieve ≥0.8 confidence in TTS selection based on quality, cost, and API availability"
+Goal: Select a TTS provider
+Criteria:
+  - Voice quality is acceptable → 85% confident (tested 3 providers)
+  - Cost is under budget → 95% confident (verified pricing)
+  - API is stable → 60% confident (only read docs, no testing)
+
+Overall: 75% confident
+
+Threshold to proceed: 80%
+
+Decision: Need more research on API stability before committing
 ```
 
-Both are **goals with acceptance criteria**. The only difference is what they produce:
-- Questions produce **knowledge** (findings, claims)
-- Build tasks produce **artifacts** (code, content, configs)
-- Decisions produce **commitments** (binding choices with rationale)
+**Will this work?** That's the key question. It depends on:
 
-## Three-Layer Architecture
+1. **Can Claude accurately self-assess confidence?** If Claude says "85% confident" but it's actually wrong 50% of the time, the whole system fails.
 
-```mermaid
-flowchart TB
-    subgraph IntentLayer["INTENT LAYER"]
-        direction LR
-        I1["Goal statement (action-oriented)"]
-        I2["Acceptance criteria"]
-        I3["Parent relationship"]
-    end
+2. **Can we detect goal drift?** If a sub-task wanders off-topic, can we catch it before wasting resources?
 
-    subgraph EvidenceLayer["EVIDENCE LAYER"]
-        direction LR
-        E1["Claims (propositions + confidence + expiry)"]
-        E2["Evidence items (sources, experiments)"]
-        E3["Aggregated confidence score"]
-    end
+3. **Is the overhead worth it?** All this tracking has a cost. Is it better than just letting Claude work naturally?
 
-    subgraph ControlLayer["CONTROL LAYER"]
-        direction LR
-        C1["Autonomy gate (proceed threshold)"]
-        C2["Budget (time, tokens, steps)"]
-        C3["Exit policy"]
-    end
+---
 
-    IntentLayer -->|"What are we trying to achieve?"| EvidenceLayer
-    EvidenceLayer -->|"How confident are we?"| ControlLayer
-    ControlLayer -->|"When do we proceed/stop?"| Output["Deliverable"]
+## What GOTN Actually Does
+
+GOTN is a **meta-layer** on top of Claude's work. Think of it as a project manager that:
+
+1. **Tracks goals** - What are we trying to achieve?
+2. **Tracks confidence** - How sure are we about each piece?
+3. **Enforces thresholds** - Don't commit until confidence is high enough
+4. **Prevents drift** - Make sure sub-tasks relate to the parent goal
+5. **Knows when to stop** - Budget limits prevent infinite research
+
+### The WorkNode: One Universal Abstraction
+
+Everything in GOTN is a **WorkNode**. Whether you're researching, building, or deciding, it's the same structure:
+
+```
+WorkNode:
+  goal: "What are we trying to do?"
+  criteria: "How do we know we succeeded?"
+  confidence: "How sure are we?" (0-100%)
+  threshold: "How sure do we need to be?" (e.g., 80%)
+  budget: "How much time/effort can we spend?"
+  children: "What sub-tasks did we spawn?"
 ```
 
-## Self-Similar Pattern
+The insight: **questions and tasks are the same thing** at different abstraction levels.
 
-Every WorkNode, regardless of mode, follows the same lifecycle:
-
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING
-    PENDING --> READY: dependencies_met
-    READY --> RUNNING: start
-    RUNNING --> BLOCKED: spawn_child
-    BLOCKED --> RUNNING: children_done
-    RUNNING --> COMPLETE: confidence >= threshold
-
-    RUNNING --> DEGRADED: budget exhausted
-    RUNNING --> ESCALATED: human required
-    RUNNING --> FAILED: error
-    BLOCKED --> ESCALATED: timeout
-    PENDING --> CANCELLED: cancel
-    READY --> CANCELLED: cancel
-    RUNNING --> CANCELLED: cancel
-    BLOCKED --> CANCELLED: cancel
-
-    COMPLETE --> [*]
-    DEGRADED --> [*]
-    ESCALATED --> [*]
-    FAILED --> [*]
-    CANCELLED --> [*]
+```
+Question: "What TTS provider should we use?"
+     ↓ reframe
+Task: "Achieve 80% confidence in TTS provider selection"
+     ↓ with criteria
+- Voice quality meets needs (test samples)
+- Cost within budget (verify pricing)
+- API is reliable (test integration)
 ```
 
-**Self-similarity**: A child WorkNode has the exact same structure. "Research TTS options" spawns "Evaluate ElevenLabs v3" which spawns "Test emotive tag performance"—each following the same cycle.
+### The Four Modes
 
-## State Machine Specification
+WorkNodes come in four flavors, based on what they produce:
 
-### Formal State Diagram
+| Mode | Purpose | Output |
+|------|---------|--------|
+| **Epistemic** | Learn something | Knowledge (claims + confidence) |
+| **Instrumental** | Build something | Artifact (code, content, config) |
+| **Decision** | Commit to something | Binding choice + rationale |
+| **Validation** | Verify something | Pass/fail + evidence |
 
-```mermaid
-flowchart TB
-    PENDING["PENDING"] -->|dependencies_met| READY["READY"]
-    READY -->|start| RUNNING["RUNNING"]
+**The key insight**: Research (epistemic) nodes must eventually lead to Decision nodes. You can't research forever—at some point you have to commit and build.
 
-    PENDING -->|cancel| CANCELLED1["CANCELLED"]
-    READY -->|cancel| CANCELLED2["CANCELLED"]
-    RUNNING -->|cancel| CANCELLED3["CANCELLED"]
-    BLOCKED -->|cancel| CANCELLED4["CANCELLED"]
-
-    RUNNING -->|spawn_child| BLOCKED["BLOCKED"]
-    RUNNING -->|error| FAILED["FAILED"]
-    BLOCKED -->|children_done| EVAL["Terminal Evaluation"]
-    RUNNING -->|complete| EVAL
-
-    EVAL -->|"confidence >= threshold"| COMPLETE["COMPLETE"]
-    EVAL -->|"budget exhausted + degrade"| DEGRADED["DEGRADED"]
-    EVAL -->|"budget exhausted + escalate"| ESCALATED["ESCALATED"]
-    EVAL -->|"budget exhausted + fail"| FAILED2["FAILED"]
-    EVAL -->|"retry needed"| RUNNING
+```
+[Research TTS options] → [Evaluate Provider A] → [Evaluate Provider B]
+                                    ↓                      ↓
+                              [DECISION: Pick Provider A]
+                                    ↓
+                              [Build integration]
 ```
 
-### State Definitions
-
-| State | Description | Invariants |
-|-------|-------------|------------|
-| `pending` | Node created but dependencies not yet satisfied | `edges.filter(depends_on).some(e => !e.target.complete)` |
-| `ready` | All dependencies satisfied, awaiting execution slot | All `depends_on` targets are `complete` or `degraded` |
-| `running` | Actively executing work | Has execution context, consuming budget |
-| `blocked` | Spawned children, awaiting their completion | `children.length > 0 && children.some(c => !c.terminal)` |
-| `complete` | Successfully finished with full deliverable | `confidence.aggregate >= autonomy_gate.proceed_threshold` |
-| `degraded` | Budget exhausted, minimal viable output produced | `budget.exhausted && outputs.length > 0` |
-| `escalated` | Human intervention required | Awaiting external resolution |
-| `failed` | Unrecoverable error, no usable output | `error != null` |
-| `cancelled` | Terminated by parent or external signal | Parent achieved threshold or explicit cancel |
-
-### Transition Events
-
-| Event | Source States | Target State | Guard Conditions |
-|-------|---------------|--------------|------------------|
-| `dependencies_met` | pending | ready | All `depends_on` edges point to terminal nodes |
-| `start` | ready | running | Execution slot available, within `MAX_CONCURRENT_NODES` |
-| `spawn_child` | running | blocked | Child node created for delegation |
-| `children_done` | blocked | running | All children in terminal state (`complete`, `degraded`, `failed`, `cancelled`) |
-| `complete` | running | complete | `confidence.aggregate >= proceed_threshold` |
-| `degrade` | running | degraded | `budget.exhausted && exit_policy.on_budget_exhausted == 'degrade'` |
-| `escalate` | running, blocked | escalated | Escalation trigger matched OR `exit_policy.on_budget_exhausted == 'escalate'` |
-| `error` | running, blocked | failed | Unrecoverable error occurred |
-| `cancel` | pending, ready, running, blocked | cancelled | Parent cancelled OR sibling satisfied parent threshold |
-
-### Event-Driven Resolution
-
-The scheduler uses a pub/sub model for efficient state transitions:
-
-```python
-class NodeEventBus:
-    """Event-driven node state coordination."""
-
-    def __init__(self):
-        self.subscribers: dict[str, list[Callable]] = defaultdict(list)
-
-    def subscribe(self, node_id: str, callback: Callable[[NodeEvent], None]):
-        """Subscribe to events from a specific node."""
-        self.subscribers[node_id].append(callback)
-
-    def publish(self, event: NodeEvent):
-        """Publish event and notify all subscribers."""
-        for callback in self.subscribers[event.source_id]:
-            callback(event)
-
-    def on_node_terminal(self, node: WorkNode):
-        """Called when a node reaches a terminal state."""
-        event = NodeEvent(
-            type='terminal',
-            source_id=node.id,
-            status=node.status,
-            outputs=node.outputs
-        )
-        self.publish(event)
-
-        # Check if parent can unblock
-        if node.parent:
-            parent = get_node(node.parent)
-            if parent.status == 'blocked':
-                if all(c.status in TERMINAL_STATES for c in parent.children):
-                    self.transition(parent, 'children_done')
-```
-
-### Concurrent State Transitions
-
-When multiple events arrive simultaneously:
-
-```python
-def handle_concurrent_events(node: WorkNode, events: list[NodeEvent]) -> str:
-    """Resolve concurrent events with priority ordering."""
-
-    # Priority: cancel > error > escalate > complete > other
-    PRIORITY = {
-        'cancel': 0,
-        'error': 1,
-        'escalate': 2,
-        'complete': 3,
-        'degrade': 4,
-        'children_done': 5,
-    }
-
-    # Sort by priority (lowest number = highest priority)
-    events.sort(key=lambda e: PRIORITY.get(e.type, 99))
-
-    # Apply highest priority event
-    return apply_transition(node, events[0])
-```
-
-### Blocked Resolution Semantics
-
-When a node enters `blocked` state:
-
-1. **Child Monitoring**: Subscribe to `terminal` events from all children
-2. **Timeout Handling**: If `budget.time_ms` expires while blocked, evaluate `exit_policy.on_blocked`
-3. **Partial Success**: If some children complete and confidence threshold met, cancel remaining children
-4. **All Children Failed**: Transition to `failed` or `escalated` based on `exit_policy`
-
-```python
-def resolve_blocked(node: WorkNode) -> str:
-    """Determine next state when all children are terminal."""
-
-    successful = [c for c in node.children if c.status in ('complete', 'degraded')]
-    failed = [c for c in node.children if c.status == 'failed']
-
-    # Aggregate evidence from successful children
-    for child in successful:
-        propagate_evidence(child, node)
-
-    # Re-evaluate confidence
-    new_confidence = aggregate_confidence(node)
-
-    if new_confidence >= node.autonomy_gate.proceed_threshold:
-        return 'complete'
+The Decision node is a **shipping gate**—it forces you to stop learning and start doing.
 
-    if len(failed) == len(node.children):
-        # All children failed
-        if node.exit_policy.on_blocked == 'escalate':
-            return 'escalated'
-        return 'failed'
-
-    if node.budget.exhausted:
-        return node.exit_policy.on_budget_exhausted  # 'degrade' | 'escalate' | 'fail'
-
-    # Can retry with different approach
-    return 'running'
-```
-
-## The DAG Structure
-
-WorkNodes form a Directed Acyclic Graph with typed edges:
-
-| Edge Type | Meaning | Blocking? |
-|-----------|---------|-----------|
-| `depends_on` | Must complete before I can start | Yes |
-| `informs` | Findings are useful but not required | No |
-| `blocks` | Risk that could halt progress | Conditional |
-| `enables` | Completion unlocks new possibilities | No |
+---
 
-```mermaid
-flowchart TB
-    ROOT["ROOT OBJECTIVE<br/>Build product"]
+## How It Relates to Claude Code
 
-    R1["R1: Epistemic<br/>What tech?"]
-    R2["R2: Epistemic<br/>What UX?"]
+Here's the honest question: **Do we need GOTN, or can Claude Code already do this?**
 
-    D1["D1: Decision<br/>Commit to stack<br/>(SHIPPING GATE)"]
-
-    B1["B1: Instrumental<br/>Build feature"]
+Claude Code already has:
+- **Task agents** for delegation
+- **Deep research skill** for thorough investigation
+- **TodoWrite** for tracking progress
+- **AskUserQuestion** for human-in-the-loop
 
-    V1["V1: Validation<br/>Test & verify"]
-
-    ROOT --> R1
-    ROOT --> R2
-    R1 -->|informs| D1
-    R2 -->|informs| D1
-    D1 -->|enables| B1
-    B1 -->|depends_on| V1
-```
+So what does GOTN add?
 
-### Edge Type Semantics
+| Capability | Claude Code | GOTN Adds |
+|------------|-------------|-----------|
+| Research | Deep research skill | **Confidence tracking** - know when you've researched "enough" |
+| Delegation | Task agents | **Goal alignment** - ensure sub-tasks serve the parent goal |
+| Progress | TodoWrite | **State machine** - formal lifecycle with clear transitions |
+| HITL | AskUserQuestion | **Escalation policies** - know *when* to ask based on confidence |
+| Budget | Timeout flags | **Resource tracking** - tokens, time, steps with enforcement |
 
-#### `depends_on` (Hard Prerequisite)
-
-**Behavior**: Target node must reach a terminal state (`complete` or `degraded`) before source can transition from `pending` to `ready`.
+**The case for GOTN**: Claude Code gives you the tools, but GOTN gives you the *discipline*. It's the difference between having a hammer and having a construction plan.
 
-```python
-def can_start(node: WorkNode) -> bool:
-    for edge in node.edges:
-        if edge.type == 'depends_on':
-            target = get_node(edge.target)
-            if target.status not in ('complete', 'degraded'):
-                return False
-    return True
-```
-
-**Deadlock Prevention**: The system validates that adding a `depends_on` edge does not create a cycle. If A depends_on B and B depends_on A (directly or transitively), the edge addition is rejected.
-
-#### `blocks` (Risk Relationship)
-
-**Behavior**: Represents a risk that could halt progress. Unlike `depends_on`, a `blocks` edge does not prevent the source from starting, but:
-1. The scheduler monitors the blocking node
-2. If the blocker enters `failed` or `escalated` state, the blocked node receives a `risk_triggered` event
-3. The blocked node must then evaluate whether to continue, degrade, or escalate
-
-```python
-def on_blocker_failed(blocked: WorkNode, blocker: WorkNode) -> None:
-    """Called when a node we're watching for risks fails."""
-    risk_assessment = evaluate_risk_impact(blocked, blocker)
-
-    if risk_assessment.severity == 'critical':
-        blocked.status = 'escalated'
-        blocked.escalation_context = EscalationContext(
-            reason=f"Blocker {blocker.id} failed",
-            options=[
-                EscalationOption(action='proceed', description='Continue despite risk'),
-                EscalationOption(action='abort', description='Stop and fail'),
-                EscalationOption(action='mitigate', description='Spawn mitigation'),
-            ]
-        )
-    elif risk_assessment.severity == 'major':
-        # Spawn mitigation research if VOI positive
-        if should_spawn_research(blocked, risk_assessment.mitigation_question):
-            spawn_child(blocked, risk_assessment.mitigation_question)
-    # Minor risks: log and continue
-```
-
-**Deadlock Prevention**: `blocks` edges are included in cycle detection alongside `depends_on`. A mutual blocking relationship (A blocks B and B blocks A) is rejected.
-
-**Resolution Timeout**: If a blocker remains in `running` or `blocked` state beyond the blocked node's deadline, the blocked node may proceed with degraded confidence or escalate.
-
-#### `informs` (Soft Prerequisite)
-
-**Behavior**: Findings from the target are useful but not required. The scheduler may:
-1. Wait opportunistically if the informer is close to completion
-2. Proceed immediately if the informer is far from completion
-3. Integrate findings retroactively if they arrive during execution
-
-```python
-def evaluate_inform_wait(source: WorkNode, informer: WorkNode) -> WaitDecision:
-    """Decide whether to wait for an informer."""
-    informer_progress = estimate_completion_time(informer)
-    source_deadline_pressure = get_deadline_factor(source)
-
-    # Wait if informer is almost done and we have time
-    if informer_progress.eta_minutes < 5 and source_deadline_pressure > 0.5:
-        return WaitDecision.WAIT_BRIEFLY
-
-    # Don't wait if under deadline pressure
-    if source_deadline_pressure < 0.3:
-        return WaitDecision.PROCEED_NOW
-
-    return WaitDecision.PROCEED_WITH_CALLBACK
-```
-
-**No Deadlock Risk**: `informs` edges are non-blocking and excluded from cycle detection.
-
-#### `enables` (Unlock Relationship)
-
-**Behavior**: Completion of the source unlocks new possibilities for the target. The target node transitions from `pending` to `ready` when enabled.
-
-```python
-def on_enabler_complete(target: WorkNode, enabler: WorkNode) -> None:
-    """Called when an enabling node completes."""
-    # Check if target was waiting for this enabler
-    if target.status == 'pending':
-        # Mark this enabler as satisfied
-        target.satisfied_enablers.add(enabler.id)
-
-        # Check if all required enablers are satisfied
-        required = [e for e in target.edges if e.type == 'enabled_by']
-        if all(e.target in target.satisfied_enablers for e in required):
-            target.status = 'ready'
-```
-
-**No Deadlock Risk**: `enables` edges represent possibility expansion, not blocking constraints.
-
-#### `spawned_by` (Parent-Child Relationship)
-
-**Behavior**: Indicates that the source node was created by the target to handle delegated work. Used for:
-1. Propagating cancellation (if parent cancels, children are cancelled)
-2. Aggregating evidence (child claims ladder up to parent)
-3. Budget accounting (child consumption counts against parent budget)
-
-```python
-def on_parent_cancelled(child: WorkNode, parent: WorkNode) -> None:
-    """Cascade cancellation to children."""
-    if child.status in ('pending', 'ready', 'running', 'blocked'):
-        child.status = 'cancelled'
-        # Recursively cancel grandchildren
-        for grandchild_ref in child.children:
-            grandchild = get_node(grandchild_ref)
-            on_parent_cancelled(grandchild, child)
-```
-
-#### `supersedes` (Replacement Relationship)
-
-**Behavior**: The source node replaces or obsoletes the target node. When a superseding edge is created:
-
-1. The superseded node is marked for cancellation (if still running)
-2. Any nodes that `depends_on` the superseded node are updated to depend on the superseding node
-3. Evidence from the superseded node may be migrated if still valid
-
-```python
-def supersede_node(new_node: WorkNode, old_node: WorkNode) -> None:
-    """Replace old_node with new_node in the graph."""
-
-    # Cancel old node if still active
-    if old_node.status in ('pending', 'ready', 'running', 'blocked'):
-        old_node.status = 'cancelled'
-
-    # Migrate dependencies: anything that depended on old now depends on new
-    for node in get_all_nodes():
-        for edge in node.edges:
-            if edge.target == old_node.id and edge.type == 'depends_on':
-                edge.target = new_node.id
-                log_info(f"Migrated dependency: {node.id} now depends on {new_node.id}")
-
-    # Preserve valid outputs from superseded node
-    if old_node.outputs:
-        for output in old_node.outputs:
-            if is_output_still_valid(output, new_node.goal):
-                new_node.inherited_outputs.append(output)
-
-    # Add supersedes edge for auditability
-    new_node.edges.append(TypedEdge(target=old_node.id, type='supersedes'))
-```
-
-**Use Cases**:
-- Retrying a failed node with different parameters
-- Replacing outdated research with fresh investigation
-- Upgrading a decision based on new evidence
-
-**Deadlock Prevention**: Supersedes edges do not participate in cycle detection since they represent historical relationships, not active blocking constraints.
-
-## Node Modes
-
-### Epistemic Mode (Research)
-
-**Purpose**: Acquire knowledge to reduce uncertainty
+**The case against GOTN**: Maybe the overhead isn't worth it. Maybe Claude's natural judgment is good enough for most tasks, and formal tracking just adds friction.
+
+### Potential Simplification
+
+Instead of bespoke Python code, we could implement GOTN as:
+- A **Claude Code skill** that enforces the discipline
+- Using **existing tools** (Task, TodoWrite, AskUserQuestion) under the hood
+- With a **simple state file** (YAML/JSON) tracking goals and confidence
+
+The question is whether the formal structure helps or hinders.
+
+---
+
+## The Confidence Model (Critical Component)
+
+This is where GOTN succeeds or fails. The entire system depends on confidence scores being meaningful.
+
+### How Confidence Works
+
+Each criterion on a goal has its own confidence:
 
 ```yaml
-mode: epistemic
-goal: "Determine optimal TTS provider"
-deliverable_type: knowledge
-outputs:
-  - claims: [{proposition, evidence, confidence, expiry}]
-  - findings: [{source, summary, relevance}]
-```
-
-### Instrumental Mode (Build)
-
-**Purpose**: Produce artifacts
-
-```yaml
-mode: instrumental
-goal: "Build TTS pipeline"
-deliverable_type: artifact
-outputs:
-  - artifacts: [{path, type, hash, metadata}]
-```
-
-### Decision Mode (Commit)
-
-**Purpose**: Make binding choices that downstream work depends on
-
-```yaml
-mode: decision
-goal: "Commit to ElevenLabs v3 as TTS provider"
-deliverable_type: commitment
-outputs:
-  - commitment:
-      choice_set: [ElevenLabs, Google, Amazon]
-      selected: ElevenLabs
-      rationale: "Best emotive quality, acceptable cost"
-      residual_risks: ["Rate limits at scale"]
-      rollback_plan: "Abstract TTS interface allows swap"
-```
-
-## Confidence Model
-
-### Per-Criterion Confidence
-
-Each acceptance criterion has its own confidence score:
-
-```yaml
-acceptance_criteria:
-  - id: quality
-    description: "TTS output sounds natural"
+goal: "Select TTS provider"
+criteria:
+  - description: "Voice quality acceptable"
     confidence: 0.85
-    evidence: [exp-001, exp-002]
-  - id: cost
-    description: "Cost < $0.01 per minute"
+    evidence: ["Tested 3 providers", "User feedback positive"]
+
+  - description: "Cost within budget"
     confidence: 0.95
-    evidence: [pricing-doc]
-  - id: api_stability
-    description: "API is stable and well-documented"
-    confidence: 0.70
-    evidence: [docs-review]
+    evidence: ["Verified pricing docs", "Calculated monthly cost"]
+
+  - description: "API stable"
+    confidence: 0.60
+    evidence: ["Read documentation"]  # No actual testing
 ```
 
-### Aggregation Strategy
+### Aggregation
 
-```python
-def aggregate_confidence(node):
-    must_pass = node.autonomy_gate.must_pass_criteria
-    must_pass_scores = [node.confidence.by_criterion[c] for c in must_pass]
-    other_scores = [v for k, v in node.confidence.by_criterion.items()
-                    if k not in must_pass]
+The overall confidence combines criteria, with **must-pass** criteria acting as a floor:
 
-    # Safety-critical: use minimum of must-pass
-    must_pass_min = min(must_pass_scores) if must_pass_scores else 1.0
+```
+must_pass criteria → use MINIMUM (if any fails, overall fails)
+optional criteria → use WEIGHTED AVERAGE
 
-    # Others: weighted mean
-    other_mean = weighted_mean(other_scores) if other_scores else 1.0
+Example:
+  must_pass: [voice_quality: 0.85, cost: 0.95] → min = 0.85
+  optional: [api_stability: 0.60, docs: 0.90] → avg = 0.75
 
-    # Risk flags can force lower aggregate
-    if 'safety' in node.autonomy_gate.risk_flags:
-        return min(must_pass_min, other_mean)
-
-    return (must_pass_min * 0.6) + (other_mean * 0.4)
+  overall = 0.6 * must_pass_min + 0.4 * optional_avg
+          = 0.6 * 0.85 + 0.4 * 0.75
+          = 0.81
 ```
 
-## Autonomy Decisions
+### The Calibration Problem
 
-```mermaid
-flowchart TB
-    Check{"confidence >= proceed_threshold?"}
+**This is the biggest risk.** If Claude says "85% confident" but is actually right only 60% of the time, the thresholds become meaningless.
 
-    Check -->|YES| AutoProceed["Auto-proceed"]
-    Check -->|NO| MidCheck{"confidence >= 0.5?"}
+Ways to address this:
+1. **Evidence requirements** - Confidence must be backed by specific evidence
+2. **Validation nodes** - Explicitly test claims before proceeding
+3. **Calibration feedback** - Track historical accuracy and adjust
 
-    MidCheck -->|YES| SpawnResearch["Spawn research<br/>to fill gaps"]
-    MidCheck -->|NO| HumanReview["Human review<br/>required"]
+---
 
-    AutoProceed --> Complete["COMPLETE"]
-    SpawnResearch --> BLOCKED["BLOCKED"]
-    HumanReview --> ESCALATED["ESCALATED"]
+## Goal Alignment (Preventing Drift)
+
+The second critical component. When you spawn sub-tasks, they can drift away from the original goal.
+
+**Example of drift:**
+```
+Root: "Build a bedtime story app"
+  └── "Research TTS providers"
+       └── "Understand voice synthesis technology"
+            └── "Study acoustic phonetics"  ← DRIFT! Not helping build the app
 ```
 
-### Autonomy Gate Configuration
+### How Alignment Works
 
-```yaml
-autonomy_gate:
-  proceed_threshold: 0.8      # Auto-proceed above this
-  must_pass_criteria: [safety, appropriateness]
-  risk_flags: [safety]        # Forces stricter evaluation
-  human_required: false       # Override to always require human
-  escalation_triggers:
-    - "cost exceeds $100"
-    - "affects production data"
+Before spawning a child node, GOTN checks if the child goal relates to the parent and root goals.
+
+**Current implementation**: Keyword matching with concept expansion
+- "TTS" relates to "voice", "speech", "audio"
+- "authentication" relates to "JWT", "OAuth", "login"
+
+**Limitation**: Keyword matching is crude. Semantic embeddings would be better but add complexity.
+
+**The question**: Is simple keyword matching good enough, or do we need more sophisticated NLP?
+
+---
+
+## The Lifecycle (State Machine)
+
+Every WorkNode follows the same lifecycle:
+
+```
+PENDING → READY → RUNNING → COMPLETE
+                    ↓
+                 BLOCKED (waiting for children)
+                    ↓
+                 RUNNING (children done)
+                    ↓
+           COMPLETE / DEGRADED / ESCALATED / FAILED
 ```
 
-## Shipping Gates
-
-**Problem**: Epistemic nodes could research forever without producing anything.
-
-**Solution**: Every research branch must terminate in a **Decision node** (shipping gate) that explicitly commits to stop learning and start building.
-
-```mermaid
-flowchart TB
-    E1["Epistemic<br/>What are the TTS options?"]
-
-    E2["Epistemic<br/>Evaluate ElevenLabs"]
-    E3["Epistemic<br/>Evaluate Google TTS"]
-
-    D1["Decision<br/>Commit to ElevenLabs v3<br/>(SHIPPING GATE)"]
-
-    I1["Instrumental<br/>Build TTS integration"]
-
-    E1 --> E2
-    E1 --> E3
-    E2 -->|"findings ladder up"| D1
-    E3 -->|"findings ladder up"| D1
-    D1 --> I1
-```
-
-**Rule**: A research node without a downstream Decision node is flagged for review. Why are we learning this if we're not going to commit to something?
-
-## VOI Gating (Value of Information)
-
-Before spawning a child research node:
-
-```python
-def should_spawn_research(parent, question):
-    voi = estimate_value_of_information(question, parent.goal)
-    cost = estimate_research_cost(question)
-
-    # Deadline pressure
-    if parent.goal.deadline:
-        time_remaining = parent.goal.deadline - now()
-        deadline_factor = time_remaining / parent.budget.time
-    else:
-        deadline_factor = 1.0
-
-    # Don't research if VOI < cost or deadline too close
-    if voi < cost or deadline_factor < 0.2:
-        return False
-
-    return True
-```
-
-## Exit Policies
-
-Every node defines what happens when it can't complete normally:
-
-```yaml
-exit_policy:
-  on_success: complete          # Normal completion
-  on_budget_exhausted: degrade  # Produce minimal viable output
-  on_blocked: spawn_child       # Create child to resolve blocker
-  degradation_output: "Use ElevenLabs v3 as default (known working)"
-```
-
-### Exit States
+### Key States
 
 | State | Meaning |
 |-------|---------|
-| `complete` | All criteria met, deliverable produced |
-| `degraded` | Budget exhausted, minimal viable output produced |
-| `escalated` | Human intervention required |
-| `failed` | Unrecoverable error, no output |
+| **PENDING** | Created but dependencies not met |
+| **READY** | Dependencies met, waiting to execute |
+| **RUNNING** | Actively working |
+| **BLOCKED** | Spawned children, waiting for them |
+| **COMPLETE** | Confidence threshold met |
+| **DEGRADED** | Budget exhausted, partial output |
+| **ESCALATED** | Needs human decision |
+| **FAILED** | Unrecoverable error |
 
-## Global Circuit Breakers
+### Why a Formal State Machine?
 
-Prevent runaway recursion:
+It might seem like overkill, but the state machine provides:
+- **Clear invariants** - You can't be RUNNING without dependencies met
+- **Deterministic transitions** - Same inputs always produce same state
+- **Debuggability** - Can trace exactly how a node reached its state
 
-```python
-GLOBAL_LIMITS = {
-    'MAX_DEPTH': 5,              # Maximum nesting level
-    'MAX_NODES_PER_ROOT': 200,   # Maximum nodes in one tree
-    'MAX_EPISTEMIC_RATIO': 0.4,  # No more than 40% research nodes
-    'CYCLE_DETECTION': True,     # Runtime DAG validation
-}
+---
+
+## Shipping Gates (Forcing Decisions)
+
+**Problem**: Research can spiral forever. There's always more to learn.
+
+**Solution**: Every research branch must terminate in a **Decision node**.
+
+```
+[Research] → [Research] → [Research] → [DECISION] → [Build]
 ```
 
-## Performance Optimizations
+The Decision node is a **shipping gate**. It forces you to:
+1. Stop gathering information
+2. Commit to a choice
+3. Document the rationale
+4. Acknowledge residual risks
 
-### Semantic Caching
+**Why this matters**: Without shipping gates, you can have 100 research nodes with no output. The gate ensures research serves a purpose.
 
-Cache research findings to avoid redundant work:
+---
 
-```python
-# Key: hash of goal + context
-cache_key = hash(goal.statement + context_fingerprint)
+## Resource Limits (Circuit Breakers)
 
-# Before spawning research
-if cache.has(cache_key) and not cache.expired(cache_key):
-    return cache.get(cache_key)  # Return cached claims
-```
-
-### Cascading Cancellation
-
-When a parent achieves sufficient confidence from one child, cancel sibling research:
+Prevent runaway behavior:
 
 ```python
-def on_child_complete(parent, child):
-    new_confidence = aggregate_confidence(parent)
-    if new_confidence >= parent.autonomy_gate.proceed_threshold:
-        for sibling in parent.children:
-            if sibling.mode == 'epistemic' and sibling.status == 'running':
-                sibling.cancel()  # No longer needed
+MAX_DEPTH = 5           # No more than 5 levels of nesting
+MAX_NODES = 200         # No more than 200 nodes per tree
+MAX_EPISTEMIC = 0.4     # No more than 40% research nodes
 ```
 
-### Context Window Management
+**Why these exist**: Without limits, a malformed goal or edge case could spawn infinite nodes. The limits provide a safety net.
 
-Completed nodes collapse to summaries:
+---
 
-```python
-def collapse_node(node):
-    return {
-        'id': node.id,
-        'status': 'complete',
-        'deliverable': node.outputs[-1],  # Just the final output
-        'confidence': node.confidence.aggregate,
-        # Internal trace is NOT passed to parent
-    }
+## Will It Actually Work?
+
+### Reasons for Optimism
+
+1. **Structure helps** - Having explicit criteria and thresholds forces clearer thinking
+2. **Confidence is useful** - Even imperfect confidence tracking is better than none
+3. **Alignment catches errors** - Even crude drift detection catches obvious mistakes
+4. **Shipping gates work** - Forcing decisions prevents analysis paralysis
+
+### Reasons for Skepticism
+
+1. **Overhead** - All this tracking might slow things down without adding value
+2. **Calibration** - If confidence isn't calibrated, thresholds are meaningless
+3. **Complexity** - More code means more bugs and maintenance
+4. **Duplication** - Claude Code already handles much of this implicitly
+
+### What Would Prove It Works?
+
+1. **Complex task completion** - Can GOTN complete a multi-step project that Claude alone would fumble?
+2. **Appropriate escalation** - Does it ask for help at the right times?
+3. **No infinite loops** - Does it actually stop researching when appropriate?
+4. **Goal coherence** - Do all sub-tasks actually contribute to the root goal?
+
+---
+
+## Implementation Options
+
+### Option A: Full Python Implementation (Current)
+
+```
+gotn/
+├── node.py       # WorkNode data model
+├── state.py      # State machine
+├── scheduler.py  # DAG execution
+├── executor.py   # Claude subprocess
+├── alignment.py  # Goal drift detection
+├── confidence.py # Confidence aggregation
+└── cli.py        # Command interface
 ```
 
-## Implementation Checklist
+**Pros**: Full control, testable, explicit
+**Cons**: Lots of code to maintain, might duplicate Claude Code
 
-1. [ ] Define WorkNode schema (TypeScript/Python interface)
-2. [ ] Implement node state machine (pending → complete)
-3. [ ] Build DAG manager with cycle detection
-4. [ ] Implement confidence aggregation
-5. [ ] Build autonomy decision engine
-6. [ ] Add shipping gate enforcement
-7. [ ] Implement VOI gating
-8. [ ] Add global circuit breakers
-9. [ ] Build semantic cache
-10. [ ] Create CLI orchestrator
-11. [ ] Add HITL notification system
+### Option B: Claude Code Skill (Lighter)
 
-## References
+A single skill file that:
+- Uses TodoWrite for tracking
+- Uses Task for delegation
+- Uses AskUserQuestion for HITL
+- Maintains state in a simple YAML file
 
-- **HTN Planning**: Erol, Hendler, Nau (1994) - Hierarchical Task Network Planning
-- **BDI Architecture**: Rao & Georgeff (1995) - Belief-Desire-Intention model
-- **OODA Loop**: Boyd (1987) - Observe-Orient-Decide-Act
-- **Goal Trees**: Dardenne, van Lamsweerde, Fickas (1993) - Goal-directed requirements acquisition
+**Pros**: Leverages existing tools, less code
+**Cons**: Less control, harder to test
+
+### Option C: Hybrid
+
+Use GOTN for the meta-layer (goals, confidence, alignment) but delegate execution to Claude Code's existing tools.
+
+**Pros**: Best of both worlds
+**Cons**: Integration complexity
+
+---
+
+## Next Steps to Validate
+
+1. **Test confidence calibration** - Give Claude tasks with known answers, measure accuracy of confidence scores
+
+2. **Test goal alignment** - Deliberately try to drift off-topic, see if detection catches it
+
+3. **Test shipping gates** - Create research-heavy tasks, verify they eventually produce decisions
+
+4. **Compare to baseline** - Same task with and without GOTN, measure quality and efficiency
+
+5. **Simplification experiment** - Try Option B (pure skill), compare to Option A (Python)
+
+---
+
+## Summary
+
+GOTN is a hypothesis: **explicit confidence tracking and goal alignment will help Claude work autonomously on complex tasks**.
+
+The system adds:
+- Structured goal tracking with criteria
+- Confidence scores with thresholds
+- Goal alignment validation
+- Shipping gates to force decisions
+- Resource limits to prevent runaway
+
+Whether this is better than just using Claude Code directly is an open question. The value depends on:
+- How well confidence scores calibrate
+- How much the structure helps vs. hinders
+- Whether the complexity is worth the discipline
+
+The best way to find out is to try it on real tasks and measure.
