@@ -291,52 +291,313 @@ Epistemic → Epistemic → Decision → Instrumental → Validation
 
 ### The Problem at Depth
 
-A node at depth 5 needs context, but passing the entire tree would explode the context window.
+A node at depth 5 needs context, but passing the entire tree would explode the context window. Yet alignment requires understanding the full ancestry—immediate parent for task context, root for ultimate objective.
 
-### The Solution: Compressed Context
+**The tension**: Alignment patches imperfectly articulated sub-goals. Every sub-goal is imperfectly articulated (natural language is lossy), so deeper nodes need MORE ancestor context to stay aligned, but have LESS budget to spend on it.
 
-Each node receives:
+### Context Budget Model
 
-1. **Goal Chain** (~500 tokens) - Compressed ancestry
-2. **Relevant Outputs** - Only from direct ancestors and siblings
-3. **Inherited Constraints** - Must-pass criteria from above
+Each node gets a total context budget (e.g., 8000 tokens). This is allocated across components:
+
+```
+┌─────────────────────────────────────────────────┐
+│ CONTEXT BUDGET (100%)                           │
+├─────────────────────────────────────────────────┤
+│ Goal Chain (Ancestry)      20%   ~1600 tokens   │
+│ Work Context              55%   ~4400 tokens   │
+│ Evidence/Claims           15%   ~1200 tokens   │
+│ Inherited Constraints     10%   ~800 tokens    │
+└─────────────────────────────────────────────────┘
+```
+
+### Ancestor Allocation with Decay
+
+The 20% goal chain budget is distributed across ancestors using **exponential decay with guaranteed root allocation**.
+
+**Principle**:
+- Root always gets context (alignment to ultimate objective)
+- Parent gets the most (immediate task context)
+- Intermediate ancestors decay exponentially
+
+**Formula**:
 
 ```python
-def build_context(node):
-    return {
-        "goal_chain": compress_ancestry(node),  # ~500 tokens
-        "parent_output": node.parent.outputs[-1] if node.parent else None,
-        "sibling_outputs": [s.outputs[-1] for s in get_siblings(node) if s.complete],
-        "inherited_constraints": node.inherited_constraints,
+def allocate_ancestor_budget(depth: int, total_budget: float = 0.20) -> dict[str, float]:
+    """
+    Allocate goal chain budget across ancestors.
+
+    Returns dict mapping ancestor level to budget fraction.
+    Level 0 = parent, Level (depth-1) = root
+    """
+    if depth == 0:
+        return {}  # Root node has no ancestors
+
+    if depth == 1:
+        return {"root": total_budget}  # Parent IS root
+
+    # Guaranteed allocations
+    ROOT_FLOOR = 0.05      # Root always gets at least 5%
+    PARENT_FLOOR = 0.08    # Parent always gets at least 8%
+
+    # Remaining budget for intermediate ancestors
+    remaining = total_budget - ROOT_FLOOR - PARENT_FLOOR
+
+    if depth == 2:
+        # Only parent and root, no intermediates
+        return {
+            "parent": PARENT_FLOOR + remaining,  # 15%
+            "root": ROOT_FLOOR                    # 5%
+        }
+
+    # Distribute remaining among intermediate ancestors with decay
+    # Decay factor: each level up gets half the previous
+    intermediate_count = depth - 2  # Exclude parent and root
+
+    allocations = {
+        "parent": PARENT_FLOOR,
+        "root": ROOT_FLOOR
     }
+
+    # Geometric series for intermediates: r + r/2 + r/4 + ...
+    # Sum = r * (1 - 0.5^n) / (1 - 0.5) = r * 2 * (1 - 0.5^n)
+    # Solve for r: r = remaining / (2 * (1 - 0.5^n))
+    decay = 0.5
+    series_sum = (1 - decay**intermediate_count) / (1 - decay)
+    base_rate = remaining / series_sum if series_sum > 0 else 0
+
+    for i in range(intermediate_count):
+        level_name = f"ancestor_{i+1}"  # ancestor_1 = grandparent
+        allocations[level_name] = base_rate * (decay ** i)
+
+    return allocations
+```
+
+**Example allocations**:
+
+```
+Depth 1 (child of root):
+  root: 20%
+
+Depth 2:
+  parent: 15%
+  root: 5%
+
+Depth 3:
+  parent: 8%
+  grandparent: 7%
+  root: 5%
+
+Depth 4:
+  parent: 8%
+  grandparent: 4.7%
+  great-grandparent: 2.3%
+  root: 5%
+
+Depth 5:
+  parent: 8%
+  grandparent: 3.5%
+  great-grandparent: 1.75%
+  great-great-grandparent: 0.75%
+  root: 5%
+```
+
+**Why this works**:
+- Root context ensures alignment to ultimate objective regardless of depth
+- Parent context provides immediate task relevance
+- Intermediate ancestors decay because their goals are progressively summarized by their children—the parent's goal already incorporates grandparent intent
+
+### Summarization Levels
+
+Each ancestor is summarized to fit its budget. More budget = more detail:
+
+```python
+def summarize_for_budget(node: WorkNode, token_budget: int) -> str:
+    """Summarize a node to fit within token budget."""
+
+    if token_budget >= 400:
+        # Full context: goal, all criteria, key constraints
+        return f"""
+        Goal: {node.goal.statement}
+        Criteria: {format_criteria(node.goal.acceptance_criteria)}
+        Key constraint: {get_key_constraint(node)}
+        """
+
+    elif token_budget >= 200:
+        # Medium context: goal, must-pass criteria only
+        must_pass = [c for c in node.goal.acceptance_criteria if c.must_pass]
+        return f"""
+        Goal: {node.goal.statement}
+        Must satisfy: {format_criteria(must_pass)}
+        """
+
+    elif token_budget >= 100:
+        # Compressed: goal summary + single constraint
+        return f"""
+        Goal: {summarize_goal(node.goal.statement, 60)}
+        Key: {get_key_constraint(node) or 'None'}
+        """
+
+    else:
+        # Minimal: just the goal essence
+        return summarize_goal(node.goal.statement, 40)
+```
+
+### Progressive Summarization
+
+As nodes complete, their context gets progressively summarized for use by descendants:
+
+```
+Depth 0 (root): Full goal statement + all criteria
+     ↓ summarized for depth 2+
+Depth 0 summary: Goal essence + must-pass only
+     ↓ further summarized for depth 4+
+Depth 0 micro: Single sentence objective
+
+Same pattern applies to each ancestor at each level.
+```
+
+**The "summary frontier"**: At any depth, you have:
+- Full detail for parent
+- Medium detail for grandparent
+- Compressed detail for great-grandparent
+- Minimal detail for ancestors beyond that
+- Always some root context
+
+### Building the Goal Chain
+
+```python
+def build_goal_chain(node: WorkNode, load_fn, context_budget: int) -> GoalChain:
+    """Build goal chain with budget-aware summarization."""
+
+    # Calculate allocations
+    allocations = allocate_ancestor_budget(node.depth, total_budget=0.20)
+
+    # Walk up the tree
+    ancestors = []
+    current = node
+    level = 0
+
+    while current.parent:
+        parent = load_fn(current.parent)
+
+        # Determine budget for this level
+        if level == 0:
+            budget_fraction = allocations.get("parent", 0)
+        elif parent.parent is None:
+            budget_fraction = allocations.get("root", 0)
+        else:
+            budget_fraction = allocations.get(f"ancestor_{level}", 0)
+
+        token_budget = int(context_budget * budget_fraction)
+
+        # Summarize to fit budget
+        summary = summarize_for_budget(parent, token_budget)
+
+        ancestors.append(GoalChainEntry(
+            node_id=parent.id,
+            depth=parent.depth,
+            goal_summary=summary,
+            mode=parent.mode.value,
+            token_budget=token_budget,
+        ))
+
+        current = parent
+        level += 1
+
+    return GoalChain(
+        root=ancestors[-1] if ancestors else None,
+        ancestors=ancestors[:-1],  # Exclude root
+        current=make_current_entry(node),
+        total_depth=node.depth,
+    )
+```
+
+### Evidence Selection
+
+The 15% evidence budget uses **semantic relevance**, not "include everything":
+
+```python
+def select_evidence(node: WorkNode, evidence_pool: list[Evidence],
+                    token_budget: int) -> list[Evidence]:
+    """Select most relevant evidence for this node's goal."""
+
+    # Score each evidence item by relevance to current goal
+    scored = []
+    for ev in evidence_pool:
+        relevance = compute_semantic_similarity(
+            ev.summary,
+            node.goal.statement
+        )
+        scored.append((relevance, ev))
+
+    # Sort by relevance, take top items that fit budget
+    scored.sort(reverse=True, key=lambda x: x[0])
+
+    selected = []
+    used_tokens = 0
+
+    for relevance, ev in scored:
+        ev_tokens = estimate_tokens(ev.to_context())
+        if used_tokens + ev_tokens <= token_budget:
+            selected.append(ev)
+            used_tokens += ev_tokens
+
+        # Stop if relevance drops too low
+        if relevance < 0.3:
+            break
+
+    return selected
 ```
 
 ### Output Collapse
 
-When a node completes, its internal trace collapses to a summary:
+When a node completes, its internal trace collapses to a summary for parent consumption:
 
 ```python
-# Before collapse (full trace)
+# Before collapse (full trace - could be 10k+ tokens)
 {
     "id": "node-xyz",
-    "goal": "Evaluate ElevenLabs",
+    "goal": "Evaluate ElevenLabs for children's TTS",
     "criteria": [...],
-    "children": [...],  # Full child trees
-    "trace": [...],     # Execution log
+    "children": [...],      # Full child trees
+    "trace": [...],         # Execution log
+    "evidence": [...],      # All gathered evidence
     "outputs": [...]
 }
 
-# After collapse (summary only)
+# After collapse (summary - ~200 tokens)
 {
     "id": "node-xyz",
     "status": "complete",
     "confidence": 0.87,
-    "summary": "ElevenLabs suitable: good voice quality, acceptable cost",
-    "key_findings": ["Voice quality 4.2/5", "Cost $0.008/min", "API stable"]
+    "summary": "ElevenLabs suitable: good voice quality (4.2/5), acceptable cost ($0.008/min), stable API",
+    "key_findings": [
+        "Voice quality rated 4.2/5 in children's content test",
+        "Cost $0.008/minute within budget",
+        "99.9% uptime over past 6 months"
+    ],
+    "deliverable_ref": "outputs/elevenlabs-evaluation.md"
 }
 ```
 
-Parents see the summary, not the full trace. This keeps context manageable at scale.
+Parents see the summary. The full trace is persisted to disk but not loaded into context.
+
+### Fail-Fast on Budget Overflow
+
+Before execution, validate that the prompt fits:
+
+```python
+def validate_context_budget(prompt: str, max_tokens: int) -> None:
+    """Fail fast if prompt exceeds budget."""
+    actual = estimate_tokens(prompt)
+    if actual > max_tokens:
+        raise ContextOverflowError(
+            f"Prompt ({actual} tokens) exceeds budget ({max_tokens}). "
+            f"Reduce evidence or increase summarization."
+        )
+```
+
+This prevents discovering overflow mid-execution.
 
 ---
 
