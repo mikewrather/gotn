@@ -2,367 +2,404 @@
 
 ## What Problem Are We Solving?
 
-When you ask Claude to "build me a sleep app", it just... builds it. Uses training data, makes reasonable choices, ships something. That's fine for simple tasks.
-
-But for complex projects - like building a story content generation system - you need a **research-to-implementation workflow**:
-
-1. Research each component
-2. Consolidate the research
-3. Evaluate findings for your specific use case
-4. Create an implementation plan
-5. Break the plan into segments
-6. Build a test POC
-7. Execute the full plan
-8. Iterate
-
-Right now, **you have to orchestrate this manually**:
+Complex projects require **recursive decomposition**. A goal breaks into sub-goals, which break into sub-sub-goals, potentially many levels deep.
 
 ```
-You: "Research TTS providers for children's narration"
-Claude: [does research]
-You: "Now consolidate those findings"
-Claude: [consolidates]
-You: "Evaluate which option fits our use case"
-Claude: [evaluates]
-You: "Create an implementation plan"
-Claude: [plans]
-You: "Break that into segments"
-...
+"Build story content generation system"
+  └── "Research TTS options"
+       └── "Evaluate ElevenLabs"
+            └── "Test voice quality for children's content"
+                 └── "Run sample generation with emotional tags"
 ```
 
-This is tedious. You're basically acting as a **workflow scheduler** and **context router** - pointing each task to the right information and deciding what comes next.
+The challenge: **each level needs to stay aligned with all levels above it**.
 
-**GOTN should automate this orchestration.**
+Without alignment, deep tasks drift:
+```
+"Build story content generation system"
+  └── "Research TTS options"
+       └── "Understand voice synthesis technology"
+            └── "Study acoustic phonetics"
+                 └── "Review papers on formant frequencies"  ← DRIFT
+```
+
+The phonetics research might be interesting, but it doesn't serve the root goal. We're building a story app, not writing a PhD thesis on acoustics.
+
+**GOTN solves this with:**
+1. **Recursive self-similar structure** - Same pattern at every level
+2. **Automatic alignment** - Each node validates against its full ancestry
+3. **Confidence tracking** - Know when a level has "enough" to proceed
+4. **Thresholds** - Gates that control advancement
 
 ---
 
-## The Core Problem: Orchestration + Context
+## The Core Model: Recursive Self-Similarity
 
-Two things you're doing manually that GOTN should handle:
-
-### 1. Workflow Orchestration
-
-You have a mental model of how research flows into implementation:
-
-```
-Research → Consolidate → Evaluate → Plan → Segment → POC → Execute
-```
-
-This isn't rigid - it's "vibes-based" and flexible. Sometimes you skip steps, sometimes you loop back. But there's a general flow.
-
-**GOTN should**: Know this flow and advance through it automatically, with the flexibility to adapt.
-
-### 2. Context Management
-
-Each step needs different context:
-- Research step needs: the question, constraints, what we already know
-- Consolidation needs: all the research outputs
-- Evaluation needs: consolidated findings + your specific use case criteria
-- Planning needs: evaluation results + technical constraints
-- Execution needs: the plan segment + relevant code context
-
-Right now you're manually routing this - copy-pasting outputs, pointing Claude to the right files, reminding it of earlier decisions.
-
-**GOTN should**: Automatically route the right context to each step.
-
----
-
-## What GOTN Actually Is
-
-GOTN is a **workflow orchestrator with context management** for research-to-implementation flows.
-
-It's NOT:
-- A "discipline layer" to stop Claude from over-researching (Claude doesn't over-research unprompted)
-- A complex confidence/threshold system (overkill for most cases)
-- A replacement for Claude's judgment
-
-It IS:
-- A way to define repeatable workflows
-- A context router that connects steps
-- A state tracker so you can pause/resume
-- A way to parallelize independent research
-
-### The Workflow Model
-
-A workflow is a sequence of **phases**, each with a type:
+Every node in GOTN has the same structure, regardless of depth:
 
 ```yaml
-workflow: "research-to-implementation"
-phases:
-  - name: "Research"
-    type: epistemic
-    parallel: true  # Can research multiple things at once
-
-  - name: "Consolidate"
-    type: epistemic
-    inputs: [Research.*]  # Gets all research outputs
-
-  - name: "Evaluate"
-    type: decision
-    inputs: [Consolidate, use_case_criteria]
-
-  - name: "Plan"
-    type: epistemic
-    inputs: [Evaluate]
-
-  - name: "Segment"
-    type: epistemic
-    inputs: [Plan]
-
-  - name: "POC"
-    type: instrumental
-    inputs: [Segment[0]]  # Just the first segment
-
-  - name: "Execute"
-    type: instrumental
-    inputs: [Segment, POC.learnings]
-    parallel: true  # Can execute segments in parallel
+WorkNode:
+  goal: "What are we trying to achieve?"
+  criteria: "How do we know we succeeded?"
+  confidence: "How sure are we?" (per criterion)
+  threshold: "How sure do we need to be to proceed?"
+  parent: "What spawned this node?"
+  children: "What sub-tasks did we spawn?"
 ```
 
-### Phase Types
+**Self-similarity means**: A node at depth 5 looks exactly like a node at depth 1. Same fields, same lifecycle, same rules.
 
-| Type | Purpose | What It Produces |
-|------|---------|------------------|
-| **Epistemic** | Learn/research | Findings, summaries, options |
-| **Decision** | Evaluate and commit | A choice with rationale |
-| **Instrumental** | Build something | Artifacts (code, content) |
-| **Validation** | Test something | Pass/fail with evidence |
+```
+Depth 0: Build story app           [goal, criteria, confidence, threshold]
+  Depth 1: Research TTS            [goal, criteria, confidence, threshold]
+    Depth 2: Evaluate ElevenLabs   [goal, criteria, confidence, threshold]
+      Depth 3: Test voice quality  [goal, criteria, confidence, threshold]
+```
 
-### Context Routing
+This recursion is what enables complex projects - you can decompose to whatever depth is needed, and the system handles it uniformly.
 
-Each phase declares its **inputs** - what context it needs. GOTN automatically:
-1. Collects outputs from the specified phases
-2. Formats them appropriately
-3. Passes them to the executing agent
+---
+
+## Alignment: The Key Mechanism
+
+### The Problem
+
+When a node spawns a child, the child might not actually serve the parent's goal. And even if it serves the parent, it might not serve the grandparent, or the root.
+
+**Alignment ensures**: Every child node serves ALL ancestors up to the root.
+
+### How It Works
+
+Before spawning a child, GOTN checks:
+
+1. **Does the child goal relate to the parent goal?**
+2. **Does the child goal relate to the root goal?**
+3. **Does the child inherit critical constraints from ancestors?**
+
+```python
+def spawn_child(parent, child_goal):
+    # Check alignment with parent
+    parent_alignment = compute_alignment(child_goal, parent.goal)
+
+    # Check alignment with root (through full ancestry)
+    root = get_root(parent)
+    root_alignment = compute_alignment(child_goal, root.goal)
+
+    # Weighted: 60% parent, 40% root
+    overall = 0.6 * parent_alignment + 0.4 * root_alignment
+
+    if overall < threshold:
+        raise AlignmentError("Child goal doesn't serve tree objectives")
+
+    # Propagate must-pass constraints from ancestors
+    child.inherited_constraints = collect_must_pass(parent)
+
+    return child
+```
+
+### The Goal Chain
+
+To check alignment without passing the entire tree (context explosion), we compress the ancestry into a **Goal Chain**:
+
+```
+Goal Chain for depth-4 node:
+┌─────────────────────────────────────────────────────┐
+│ ROOT (depth 0): Build story content generation      │
+│   └─ Key constraint: Age-appropriate (3-8 years)    │
+│                                                     │
+│ PARENT (depth 3): Test voice quality                │
+│   └─ Key constraint: Must sound natural             │
+│                                                     │
+│ CURRENT (depth 4): Run sample with emotional tags   │
+│                                                     │
+│ Inherited constraints:                              │
+│   - Age-appropriate content                         │
+│   - Natural voice quality                           │
+│   - Under budget ($0.01/minute)                     │
+│                                                     │
+│ Alignment score: 82%                                │
+└─────────────────────────────────────────────────────┘
+```
+
+This compresses to ~500 tokens regardless of depth. The current node knows:
+- What the root is trying to achieve
+- What the immediate parent needs
+- What constraints must be satisfied
+
+### Constraint Propagation
+
+**Must-pass constraints cascade down the tree.** If the root says "must be age-appropriate", every descendant inherits that constraint.
 
 ```yaml
-# Evaluate phase gets:
-# - The consolidated research (Consolidate output)
-# - The use case criteria (from config or user input)
+# Root node
+goal: "Build story content generation"
+criteria:
+  - description: "Age-appropriate for 3-8 years"
+    must_pass: true  # ← This propagates to ALL children
 
-- name: "Evaluate"
-  inputs:
-    - Consolidate           # Output from previous phase
-    - use_case_criteria     # Config value or file reference
+# Depth 3 child automatically inherits:
+inherited_constraints:
+  - "[Inherited] Age-appropriate for 3-8 years"
 ```
+
+This ensures that no matter how deep the decomposition goes, critical requirements aren't forgotten.
 
 ---
 
-## How It Works with Claude Code
+## Confidence and Thresholds
 
-GOTN doesn't replace Claude Code - it orchestrates it.
+### Why Confidence Matters
 
-```
-GOTN Orchestrator
-    ↓
-    ├── Phase: Research TTS
-    │   └── [Claude Code: deep-research skill]
-    │
-    ├── Phase: Research Voice Styles
-    │   └── [Claude Code: deep-research skill]
-    │
-    ├── Phase: Consolidate
-    │   └── [Claude Code: summarization task]
-    │
-    ├── Phase: Evaluate
-    │   └── [Claude Code: analysis task]
-    │
-    └── Phase: Execute
-        └── [Claude Code: implementation task]
-```
+At each level, you need to know: **Do I have enough information to proceed?**
 
-Each phase invokes Claude Code with:
-- The phase goal
-- The routed context (inputs from previous phases)
-- Any phase-specific tools or skills
+Without confidence tracking:
+- Research might stop too early (missed important considerations)
+- Research might continue forever (analysis paralysis)
+- Parent nodes don't know if children actually answered the question
 
-### Tool Selection by Phase Type
+### Per-Criterion Confidence
 
-| Phase Type | Default Tools |
-|------------|---------------|
-| Epistemic | deep-research, web-search, Explore |
-| Decision | triad-orchestrator (multi-model), analysis |
-| Instrumental | code tools, file operations |
-| Validation | test runners, verification tools |
-
----
-
-## Minimal Implementation
-
-The simplest GOTN could be a **Claude Code skill** that:
-
-1. Reads a workflow definition (YAML file)
-2. Tracks current phase in a state file
-3. Routes context between phases
-4. Advances to next phase when current completes
+Each criterion on a goal gets its own confidence score:
 
 ```yaml
-# .gotn/workflow.yaml
-name: "NES Story Generation"
-phases:
-  - research-tts
-  - research-story-structure
-  - consolidate
-  - evaluate
-  - plan
-  - execute
+goal: "Evaluate ElevenLabs for children's TTS"
+criteria:
+  - description: "Voice quality acceptable for children"
+    confidence: 0.85
+    evidence: ["Tested 5 voice samples", "Kids focus group positive"]
 
-# .gotn/state.yaml
-current_phase: "consolidate"
-completed:
-  research-tts: "outputs/research-tts.md"
-  research-story-structure: "outputs/research-story.md"
+  - description: "Cost within budget"
+    confidence: 0.95
+    evidence: ["Pricing confirmed at $0.008/minute"]
+
+  - description: "API reliable"
+    confidence: 0.60
+    evidence: ["Read docs, no live testing yet"]
 ```
 
-The skill would:
-1. Read state to know where we are
-2. Gather inputs for current phase
-3. Execute the phase (using Claude Code tools)
-4. Save outputs
-5. Advance state
-6. Repeat or pause for human input
+### Threshold Logic
 
----
+```
+If confidence >= threshold:
+    → Mark complete, return to parent
 
-## What About Confidence and Alignment?
+If confidence < threshold AND budget remaining:
+    → Spawn more research
 
-These might still be useful, but they're **secondary features**, not the core:
-
-**Confidence tracking**: Useful for knowing when a research phase has "enough" information to move on. But can be simple - "do I have answers to my key questions?" rather than numerical thresholds.
-
-**Goal alignment**: Useful for catching when parallel research tasks drift. But can be lightweight - just checking that outputs relate to the workflow goal.
-
-**Shipping gates**: The Decision phases already serve this purpose - they force you to commit before moving to implementation.
-
-These can be added incrementally if the basic orchestration proves valuable.
-
----
-
-## Example: NES Story Content Workflow
-
-Here's how your actual workflow might look:
-
-```yaml
-name: "NES Story Content Generation"
-
-context:
-  project: "Interactive bedtime stories for children"
-  constraints:
-    - "Age-appropriate content (3-8 years)"
-    - "Must work offline after initial load"
-    - "Voice narration required"
-
-phases:
-  - name: "Research TTS Options"
-    type: epistemic
-    goal: "Find TTS providers suitable for children's content"
-    parallel_with: ["Research Story Structures"]
-
-  - name: "Research Story Structures"
-    type: epistemic
-    goal: "Understand interactive story formats for children"
-
-  - name: "Consolidate Research"
-    type: epistemic
-    inputs: ["Research TTS Options", "Research Story Structures"]
-    goal: "Synthesize findings into coherent options"
-
-  - name: "Evaluate for Use Case"
-    type: decision
-    inputs: ["Consolidate Research", "context.constraints"]
-    goal: "Select TTS provider and story format"
-    outputs:
-      - tts_choice
-      - story_format
-      - rationale
-
-  - name: "Implementation Plan"
-    type: epistemic
-    inputs: ["Evaluate for Use Case"]
-    goal: "Create detailed implementation plan"
-
-  - name: "Segment Plan"
-    type: epistemic
-    inputs: ["Implementation Plan"]
-    goal: "Break into independently testable segments"
-    outputs:
-      - segments[]  # Array of segments
-
-  - name: "POC"
-    type: instrumental
-    inputs: ["Segment Plan.segments[0]"]
-    goal: "Build minimal working proof of concept"
-
-  - name: "Execute Segments"
-    type: instrumental
-    inputs: ["Segment Plan.segments", "POC.learnings"]
-    goal: "Implement remaining segments"
-    parallel: true
+If confidence < threshold AND budget exhausted:
+    → Degrade (partial answer) OR escalate (ask human)
 ```
 
-Running this:
+### Aggregation
 
-```bash
-gotn run nes-story-workflow.yaml
+Overall confidence combines criteria:
 
-# GOTN executes each phase, routing context automatically
-# You can pause/resume at any point
-# Parallel phases run concurrently
+```python
+def aggregate(criteria):
+    must_pass = [c for c in criteria if c.must_pass]
+    optional = [c for c in criteria if not c.must_pass]
+
+    # Must-pass: use minimum (if any fails, overall fails)
+    must_pass_score = min(c.confidence for c in must_pass) if must_pass else 1.0
+
+    # Optional: weighted average
+    optional_score = weighted_mean(c.confidence for c in optional) if optional else 1.0
+
+    # Combine: 60% must-pass, 40% optional
+    return 0.6 * must_pass_score + 0.4 * optional_score
 ```
 
 ---
 
-## Implementation Options
+## The Recursive Workflow
 
-### Option A: Claude Code Skill (Simplest)
+Here's how it all fits together:
 
-A skill file that implements the orchestration loop. State lives in YAML files in the project.
+```
+1. Start with root goal
+   └── Check: confidence >= threshold?
+       └── NO: Spawn children to fill gaps
+           └── Each child:
+               └── Validate alignment with ancestry
+               └── Inherit must-pass constraints
+               └── Execute (may spawn its own children)
+               └── Return confidence + outputs
+           └── Aggregate child results
+           └── Re-check: confidence >= threshold?
+               └── YES: Complete
+               └── NO: Spawn more OR degrade OR escalate
+```
 
-**Pros**: No external dependencies, uses existing Claude Code tools
-**Cons**: Limited parallelism, skill-based state management can be fragile
+### Example Trace
 
-### Option B: Lightweight Python CLI
+```
+[ROOT] Build story content generation (confidence: 0%)
+  │
+  ├─ Spawn: Research TTS (aligned: 95%)
+  │   │
+  │   ├─ Spawn: Evaluate ElevenLabs (aligned: 88%)
+  │   │   │
+  │   │   ├─ Spawn: Test voice quality (aligned: 85%)
+  │   │   │   └─ COMPLETE (confidence: 90%)
+  │   │   │
+  │   │   ├─ Spawn: Check pricing (aligned: 92%)
+  │   │   │   └─ COMPLETE (confidence: 98%)
+  │   │   │
+  │   │   └─ COMPLETE (confidence: 87%)
+  │   │
+  │   ├─ Spawn: Evaluate Google TTS (aligned: 86%)
+  │   │   └─ ... (similar structure)
+  │   │
+  │   └─ COMPLETE (confidence: 85%)
+  │
+  ├─ Spawn: Research story structure (aligned: 91%)
+  │   └─ ... (similar structure)
+  │
+  └─ DECISION: Commit to ElevenLabs (confidence: 88%)
+      │
+      └─ Spawn: Build TTS integration (aligned: 94%)
+          └─ ... (instrumental work)
+```
 
-A Python CLI that:
-- Parses workflow definitions
-- Manages state (SQLite or YAML)
-- Invokes Claude Code for each phase
-- Routes context
-
-**Pros**: Better state management, easier parallelism, testable
-**Cons**: Separate tool to install/run
-
-### Option C: Current Implementation (Overkill?)
-
-The full Python package with state machines, confidence aggregation, alignment scoring, etc.
-
-**Pros**: Full featured
-**Cons**: Lots of code for features that might not be needed
-
-**Recommendation**: Start with Option A or B. Add complexity only if the basic orchestration proves valuable.
+Each spawn is validated for alignment. Each completion rolls up confidence. The tree grows and contracts as needed.
 
 ---
 
-## Key Questions to Answer
+## The Four Node Types
 
-1. **Is workflow definition worth it?** Or is ad-hoc orchestration actually fine?
+All nodes have the same structure, but differ in what they produce:
 
-2. **How much context routing is needed?** Is "just pass all previous outputs" good enough, or do we need precise routing?
+| Type | Purpose | Output | Typical Children |
+|------|---------|--------|------------------|
+| **Epistemic** | Learn something | Knowledge, findings | More epistemic, or decision |
+| **Decision** | Commit to something | Binding choice | Instrumental |
+| **Instrumental** | Build something | Artifacts | Validation, more instrumental |
+| **Validation** | Verify something | Pass/fail | None (usually leaf) |
 
-3. **Where should state live?** Files in the project? Separate database?
+### The Flow
 
-4. **How to handle parallelism?** Run multiple Claude instances? Or just sequential with async potential?
+```
+Epistemic → Epistemic → Decision → Instrumental → Validation
+(research)   (refine)    (commit)    (build)       (verify)
+```
 
-5. **What's the right granularity?** Are "phases" the right unit, or should it be more/less granular?
+**Decision nodes are shipping gates** - they force the transition from research to implementation. You can't build until you've committed.
+
+---
+
+## Context Management
+
+### The Problem at Depth
+
+A node at depth 5 needs context, but passing the entire tree would explode the context window.
+
+### The Solution: Compressed Context
+
+Each node receives:
+
+1. **Goal Chain** (~500 tokens) - Compressed ancestry
+2. **Relevant Outputs** - Only from direct ancestors and siblings
+3. **Inherited Constraints** - Must-pass criteria from above
+
+```python
+def build_context(node):
+    return {
+        "goal_chain": compress_ancestry(node),  # ~500 tokens
+        "parent_output": node.parent.outputs[-1] if node.parent else None,
+        "sibling_outputs": [s.outputs[-1] for s in get_siblings(node) if s.complete],
+        "inherited_constraints": node.inherited_constraints,
+    }
+```
+
+### Output Collapse
+
+When a node completes, its internal trace collapses to a summary:
+
+```python
+# Before collapse (full trace)
+{
+    "id": "node-xyz",
+    "goal": "Evaluate ElevenLabs",
+    "criteria": [...],
+    "children": [...],  # Full child trees
+    "trace": [...],     # Execution log
+    "outputs": [...]
+}
+
+# After collapse (summary only)
+{
+    "id": "node-xyz",
+    "status": "complete",
+    "confidence": 0.87,
+    "summary": "ElevenLabs suitable: good voice quality, acceptable cost",
+    "key_findings": ["Voice quality 4.2/5", "Cost $0.008/min", "API stable"]
+}
+```
+
+Parents see the summary, not the full trace. This keeps context manageable at scale.
+
+---
+
+## How It Relates to Claude Code
+
+GOTN orchestrates Claude Code, not replaces it.
+
+```
+GOTN                          Claude Code
+─────                         ───────────
+Workflow orchestration   →    Task agents
+Alignment validation     →    (GOTN provides this)
+Confidence tracking      →    (GOTN provides this)
+Context routing          →    Skill selection
+                              Tool execution
+                              File operations
+```
+
+Each node executes via Claude Code:
+- Epistemic nodes → deep-research skill, web search, Explore
+- Decision nodes → triad-orchestrator, analysis
+- Instrumental nodes → code tools, file operations
+- Validation nodes → test runners
+
+GOTN adds the meta-layer: alignment, confidence, recursion management.
+
+---
+
+## Implementation Approach
+
+Given that alignment, confidence, and recursion are all essential:
+
+### Keep from Current Implementation
+
+- **WorkNode structure** - The self-similar node model
+- **State machine** - Node lifecycle management
+- **Alignment module** - Goal chain, alignment scoring, constraint propagation
+- **Confidence aggregation** - Per-criterion tracking, must-pass logic
+- **Scheduler** - Manages execution order, concurrency
+
+### Simplify or Remove
+
+- **Complex edge types** - Keep spawned_by and depends_on, simplify others
+- **VOI gating** - Can add later if needed
+- **Semantic cache** - Nice to have, not essential for core
+
+### Add
+
+- **Workflow definitions** - YAML files that define common patterns
+- **Better context compression** - More sophisticated goal chain building
+- **Output collapse** - Automatic summarization on completion
 
 ---
 
 ## Summary
 
-**The real problem**: You have to manually orchestrate research-to-implementation workflows, acting as scheduler and context router.
+**GOTN is a recursive orchestration system where:**
 
-**GOTN should be**: A workflow orchestrator that automates this - defining flows, routing context, tracking state, invoking Claude Code for each step.
+1. **Goals decompose recursively** - Each level can spawn children as needed
+2. **Every level has the same structure** - Self-similar nodes all the way down
+3. **Alignment is automatic** - Children validate against full ancestry before spawning
+4. **Confidence gates progress** - Nodes complete when they have "enough"
+5. **Constraints propagate** - Must-pass criteria cascade to all descendants
+6. **Context is compressed** - Goal chains keep context manageable at depth
 
-**The confidence/alignment/threshold stuff**: Secondary features that can be added if basic orchestration proves valuable.
-
-**Next step**: Try the simplest implementation (Option A or B) on a real workflow and see if it actually helps.
+The system handles the manual orchestration burden while ensuring that no matter how deep the decomposition goes, every node serves the root objective.
