@@ -626,6 +626,182 @@ GOTN adds the meta-layer: alignment, confidence, recursion management.
 
 ---
 
+## Data Strategy: Kuzu Graph Database
+
+GOTN's data model is naturally a graph - nodes with typed relationships, ancestry traversal, dependency edges. We use **Kuzu**, an embedded graph database, for storage and queries.
+
+### Why Kuzu
+
+| Need | Solution |
+|------|----------|
+| Tree traversal (ancestors, descendants) | Native Cypher path queries |
+| Relationship queries (parent, children, enables) | Graph-native, O(1) edge traversal |
+| Embedded deployment | Single directory, no server |
+| Python integration | `pip install kuzu`, in-process |
+
+### Schema
+
+```cypher
+-- Node types
+CREATE NODE TABLE WorkNode(
+    id STRING,
+    goal STRING,
+    mode STRING,          -- epistemic, decision, instrumental, validation
+    status STRING,        -- pending, ready, running, blocked, complete, etc.
+    depth INT64,
+    confidence DOUBLE,
+    data STRING,          -- Full node JSON for complex fields
+    created_at TIMESTAMP,
+    PRIMARY KEY(id)
+)
+
+CREATE NODE TABLE Evidence(
+    id STRING,
+    content STRING,
+    domain STRING,        -- technical, contextual, user_provided
+    strength DOUBLE,
+    created_at TIMESTAMP,
+    PRIMARY KEY(id)
+)
+
+-- Relationships
+CREATE REL TABLE PARENT(FROM WorkNode TO WorkNode)
+CREATE REL TABLE SPAWNED_BY(FROM WorkNode TO WorkNode)
+CREATE REL TABLE DEPENDS_ON(FROM WorkNode TO WorkNode)
+CREATE REL TABLE ENABLES(FROM WorkNode TO WorkNode)
+CREATE REL TABLE HAS_EVIDENCE(FROM WorkNode TO Evidence)
+CREATE REL TABLE ANCHORED_TO(FROM WorkNode TO WorkNode)  -- production_anchor
+```
+
+### Key Queries
+
+```cypher
+-- Get full ancestry (goal chain)
+MATCH (n:WorkNode {id: $node_id})-[:PARENT*]->(ancestor)
+RETURN ancestor.id, ancestor.goal, ancestor.depth
+ORDER BY ancestor.depth DESC
+
+-- Get all descendants
+MATCH (n:WorkNode {id: $node_id})<-[:PARENT*]-(descendant)
+RETURN descendant
+
+-- Find ready nodes (scheduling)
+MATCH (n:WorkNode {status: 'ready'})
+RETURN n ORDER BY n.depth DESC, n.created_at
+
+-- Check if all children are terminal
+MATCH (parent:WorkNode {id: $node_id})<-[:PARENT]-(child)
+WHERE child.status NOT IN ['complete', 'failed', 'cancelled', 'degraded']
+RETURN count(child) AS pending_children
+
+-- Find research anchored to a decision
+MATCH (research:WorkNode)-[:ANCHORED_TO]->(decision:WorkNode {mode: 'decision'})
+WHERE decision.id = $decision_id
+RETURN research
+
+-- Validate no cycles (before adding edge)
+MATCH path = (target:WorkNode {id: $target_id})-[:DEPENDS_ON|PARENT*]->(source:WorkNode {id: $source_id})
+RETURN count(path) > 0 AS would_create_cycle
+```
+
+### Storage Layout
+
+```
+store/
+├── graph/                    # Kuzu database directory
+│   ├── nodes.kz
+│   ├── rels.kz
+│   └── ...
+├── outputs/                  # Large artifacts (not in graph)
+│   └── {node_id}/
+│       ├── result.md
+│       └── artifacts/
+└── cache/                    # Semantic cache (optional)
+    └── embeddings.kz         # Separate Kuzu DB for cache
+```
+
+### Context Fingerprinting
+
+With Kuzu, fingerprinting becomes a graph query:
+
+```cypher
+-- Compute context fingerprint for cache lookup
+MATCH (n:WorkNode {id: $node_id})-[:PARENT*]->(root)
+WITH n, root, collect(root.id) AS ancestry
+MATCH (n)-[:ANCHORED_TO]->(anchor)
+RETURN
+    root.id AS root_id,
+    anchor.id AS anchor_id,
+    n.depth AS depth,
+    ancestry AS ancestor_chain
+```
+
+The fingerprint is: `hash(root_id + anchor_id + depth + constraint_hashes)`
+
+Same context = same fingerprint = safe to reuse cached research.
+
+### Python Integration
+
+```python
+import kuzu
+
+class GraphStore:
+    def __init__(self, path: str = "./store/graph"):
+        self.db = kuzu.Database(path)
+        self.conn = kuzu.Connection(self.db)
+        self._init_schema()
+
+    def get_ancestors(self, node_id: str) -> list[WorkNode]:
+        """Get full ancestry for goal chain."""
+        result = self.conn.execute("""
+            MATCH (n:WorkNode {id: $id})-[:PARENT*]->(ancestor)
+            RETURN ancestor.id, ancestor.goal, ancestor.depth, ancestor.data
+            ORDER BY ancestor.depth DESC
+        """, {"id": node_id})
+        return [self._to_worknode(row) for row in result]
+
+    def get_ready_nodes(self) -> list[WorkNode]:
+        """Get nodes ready for execution."""
+        result = self.conn.execute("""
+            MATCH (n:WorkNode {status: 'ready'})
+            RETURN n
+            ORDER BY n.depth DESC, n.created_at
+        """)
+        return [self._to_worknode(row) for row in result]
+
+    def spawn_child(self, parent_id: str, child: WorkNode) -> None:
+        """Create child node with parent relationship."""
+        self.conn.execute("""
+            CREATE (c:WorkNode {
+                id: $child_id,
+                goal: $goal,
+                mode: $mode,
+                status: 'pending',
+                depth: $depth,
+                data: $data
+            })
+        """, child.to_params())
+
+        self.conn.execute("""
+            MATCH (c:WorkNode {id: $child_id}), (p:WorkNode {id: $parent_id})
+            CREATE (c)-[:PARENT]->(p)
+            CREATE (c)-[:SPAWNED_BY]->(p)
+        """, {"child_id": child.id, "parent_id": parent_id})
+```
+
+### Benefits Over SQLite
+
+| Operation | SQLite | Kuzu |
+|-----------|--------|------|
+| Get ancestors | Recursive CTE (verbose) | `[:PARENT*]` (one line) |
+| Check cycles | Multiple queries | Single path query |
+| Find connected subgraph | Complex joins | Native traversal |
+| Add relationship types | Schema migration | Just add REL TABLE |
+
+The data model matches the domain, so queries are intuitive.
+
+---
+
 ## Implementation Approach
 
 Given that alignment, confidence, and recursion are all essential:
