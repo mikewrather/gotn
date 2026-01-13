@@ -215,19 +215,28 @@ def aggregate(criteria):
 
 Here's how it all fits together:
 
-```
-1. Start with root goal
-   └── Check: confidence >= threshold?
-       └── NO: Spawn children to fill gaps
-           └── Each child:
-               └── Validate alignment with ancestry
-               └── Inherit must-pass constraints
-               └── Execute (may spawn its own children)
-               └── Return confidence + outputs
-           └── Aggregate child results
-           └── Re-check: confidence >= threshold?
-               └── YES: Complete
-               └── NO: Spawn more OR degrade OR escalate
+```mermaid
+flowchart TB
+    Start["Start with root goal"] --> Check{"confidence >= threshold?"}
+    Check -->|YES| Complete["Complete"]
+    Check -->|NO| Spawn["Spawn children to fill gaps"]
+
+    subgraph ChildExecution["For each child"]
+        Validate["Validate alignment with ancestry"]
+        Inherit["Inherit must-pass constraints"]
+        Execute["Execute (may spawn own children)"]
+        Return["Return confidence + outputs"]
+
+        Validate --> Inherit --> Execute --> Return
+    end
+
+    Spawn --> ChildExecution
+    ChildExecution --> Aggregate["Aggregate child results"]
+    Aggregate --> ReCheck{"confidence >= threshold?"}
+    ReCheck -->|YES| Complete
+    ReCheck -->|NO| Decision{"Budget remaining?"}
+    Decision -->|YES| Spawn
+    Decision -->|NO| Fallback["Degrade OR Escalate"]
 ```
 
 ### Example Trace
@@ -312,22 +321,29 @@ No child WorkNodes spawned (cheaper)
 
 The two modes compose naturally:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Task Node: Research TTS Options                             │
-│   └── Uses data recursion internally to process 50 papers  │
-│       └── Writes claims to shared store                     │
-│                                                             │
-│ Task Node: Decision - Select TTS Provider                   │
-│   └── Queries claims from store (Tier 2)                    │
-│   └── Runs ContextFilter to score options vs constraints    │
-│   └── Outputs: Commitment to ElevenLabs                     │
-│                                                             │
-│ Task Node: Implementation - Build TTS Integration           │
-│   └── Queries decision + constraints (Tier 2)               │
-│   └── Uses data recursion for large codebase analysis       │
-│   └── Outputs: Working integration                          │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Research["Task Node: Research TTS Options"]
+        R1["Data recursion on 50 papers"]
+        R2["Write claims to store"]
+        R1 --> R2
+    end
+
+    subgraph Decision["Task Node: Select TTS Provider"]
+        D1["Query claims (Tier 2)"]
+        D2["ContextFilter scoring"]
+        D3["Output: Commit to ElevenLabs"]
+        D1 --> D2 --> D3
+    end
+
+    subgraph Build["Task Node: Build TTS Integration"]
+        B1["Query decision + constraints"]
+        B2["Data recursion for codebase"]
+        B3["Output: Working integration"]
+        B1 --> B2 --> B3
+    end
+
+    Research --> Decision --> Build
 ```
 
 ### When to Use Which
@@ -384,9 +400,14 @@ All nodes have the same structure, but differ in what they produce:
 
 ### The Flow
 
-```
-Epistemic → Epistemic → Decision → Instrumental → Validation
-(research)   (refine)    (commit)    (build)       (verify)
+```mermaid
+flowchart LR
+    E1["Epistemic<br/>(research)"] --> E2["Epistemic<br/>(refine)"]
+    E2 --> D["Decision<br/>(commit)"]
+    D --> I["Instrumental<br/>(build)"]
+    I --> V["Validation<br/>(verify)"]
+
+    style D fill:#f96,stroke:#333
 ```
 
 **Decision nodes are shipping gates** - they force the transition from research to implementation. You can't build until you've committed.
@@ -411,27 +432,33 @@ GOTN uses a **hybrid approach** inspired by Recursive Language Models (RLM):
 2. **Query (Tier 2)**: On-demand access to graph via tools
 3. **Lazy (Tier 3)**: External fetches only when gaps detected
 
-```
-┌────────────────────────────────────────────────────────┐
-│ TIER 1: ALWAYS STUFFED (5-8% budget)                   │
-│   • Goal Capsule (immutable root goal + constraints)   │
-│   • Immediate parent goal + key constraint             │
-│   • Production anchor reference                        │
-│   Why: Prevents drift, always available                │
-├────────────────────────────────────────────────────────┤
-│ TIER 2: QUERY INTERFACE (Tools)                        │
-│   • Full ancestor context via graph queries            │
-│   • Sibling node outputs (completed peers)             │
-│   • Evidence store with semantic search                │
-│   • Cached research claims                             │
-│   Why: Cheaper than stuffing, allows deep recursion    │
-├────────────────────────────────────────────────────────┤
-│ TIER 3: ON-DEMAND EXTERNAL (Lazy Fetch)                │
-│   • Web search / documentation                         │
-│   • Code analysis                                      │
-│   • External API calls                                 │
-│   Why: Only when gaps detected                         │
-└────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Tier1["TIER 1: ALWAYS STUFFED (5-8% budget)"]
+        direction LR
+        T1A["Goal Capsule"]
+        T1B["Parent goal + constraint"]
+        T1C["Production anchor"]
+    end
+
+    subgraph Tier2["TIER 2: QUERY INTERFACE (Tools)"]
+        direction LR
+        T2A["Ancestor context"]
+        T2B["Sibling outputs"]
+        T2C["Evidence store"]
+        T2D["Research claims"]
+    end
+
+    subgraph Tier3["TIER 3: ON-DEMAND EXTERNAL (Lazy)"]
+        direction LR
+        T3A["Web search"]
+        T3B["Documentation"]
+        T3C["External APIs"]
+    end
+
+    Tier1 -->|"Always available<br/>Prevents drift"| Claude["Claude Execution"]
+    Tier2 -->|"Query when needed<br/>VoI-gated"| Claude
+    Tier3 -->|"Fetch on gaps<br/>Lazy load"| Claude
 ```
 
 ### When to Use Which Tier
@@ -561,16 +588,13 @@ result = {
 
 With the hybrid approach, the budget shifts:
 
-```
-┌─────────────────────────────────────────────────┐
-│ CONTEXT BUDGET (100%)                           │
-├─────────────────────────────────────────────────┤
-│ Tier 1 (Goal Capsule + Parent)  8%   ~640 tk    │
-│ Work Context                   60%   ~4800 tk   │
-│ Query Tool Responses (Tier 2)  20%   ~1600 tk   │
-│ Filter Script Output           7%    ~560 tk    │
-│ Reserved for Output            5%    ~400 tk    │
-└─────────────────────────────────────────────────┘
+```mermaid
+pie title Context Budget (100% = 8000 tokens)
+    "Tier 1 - Goal Capsule + Parent (8%)" : 8
+    "Work Context (60%)" : 60
+    "Tier 2 - Query Responses (20%)" : 20
+    "Filter Script Output (7%)" : 7
+    "Reserved for Output (5%)" : 5
 ```
 
 The 20% previously allocated to ancestor chain is now available for work context, with ancestors accessed on-demand via Tier 2 queries.
@@ -582,144 +606,32 @@ The 20% goal chain budget is distributed across ancestors using **exponential de
 **Principle**:
 - Root always gets context (alignment to ultimate objective)
 - Parent gets the most (immediate task context)
-- Intermediate ancestors decay exponentially
-
-**Formula**:
-
-```python
-def allocate_ancestor_budget(depth: int, total_budget: float = 0.20) -> dict[str, float]:
-    """
-    Allocate goal chain budget across ancestors.
-
-    Returns dict mapping ancestor level to budget fraction.
-    Level 0 = parent, Level (depth-1) = root
-    """
-    if depth == 0:
-        return {}  # Root node has no ancestors
-
-    if depth == 1:
-        return {"root": total_budget}  # Parent IS root
-
-    # Guaranteed allocations
-    ROOT_FLOOR = 0.05      # Root always gets at least 5%
-    PARENT_FLOOR = 0.08    # Parent always gets at least 8%
-
-    # Remaining budget for intermediate ancestors
-    remaining = total_budget - ROOT_FLOOR - PARENT_FLOOR
-
-    if depth == 2:
-        # Only parent and root, no intermediates
-        return {
-            "parent": PARENT_FLOOR + remaining,  # 15%
-            "root": ROOT_FLOOR                    # 5%
-        }
-
-    # Distribute remaining among intermediate ancestors with decay
-    # Decay factor: each level up gets half the previous
-    intermediate_count = depth - 2  # Exclude parent and root
-
-    allocations = {
-        "parent": PARENT_FLOOR,
-        "root": ROOT_FLOOR
-    }
-
-    # Geometric series for intermediates: r + r/2 + r/4 + ...
-    # Sum = r * (1 - 0.5^n) / (1 - 0.5) = r * 2 * (1 - 0.5^n)
-    # Solve for r: r = remaining / (2 * (1 - 0.5^n))
-    decay = 0.5
-    series_sum = (1 - decay**intermediate_count) / (1 - decay)
-    base_rate = remaining / series_sum if series_sum > 0 else 0
-
-    for i in range(intermediate_count):
-        level_name = f"ancestor_{i+1}"  # ancestor_1 = grandparent
-        allocations[level_name] = base_rate * (decay ** i)
-
-    return allocations
-```
+- Intermediate ancestors decay exponentially (each level gets half the previous)
 
 **Example allocations**:
 
-```
-Depth 1 (child of root):
-  root: 20%
+| Depth | Parent | Grandparent | Great-GP | Root |
+|-------|--------|-------------|----------|------|
+| 1 | - | - | - | 20% |
+| 2 | 15% | - | - | 5% |
+| 3 | 8% | 7% | - | 5% |
+| 4 | 8% | 4.7% | 2.3% | 5% |
+| 5 | 8% | 3.5% | 1.75% | 5% |
 
-Depth 2:
-  parent: 15%
-  root: 5%
-
-Depth 3:
-  parent: 8%
-  grandparent: 7%
-  root: 5%
-
-Depth 4:
-  parent: 8%
-  grandparent: 4.7%
-  great-grandparent: 2.3%
-  root: 5%
-
-Depth 5:
-  parent: 8%
-  grandparent: 3.5%
-  great-grandparent: 1.75%
-  great-great-grandparent: 0.75%
-  root: 5%
-```
-
-**Why this works**:
-- Root context ensures alignment to ultimate objective regardless of depth
-- Parent context provides immediate task relevance
-- Intermediate ancestors decay because their goals are progressively summarized by their children—the parent's goal already incorporates grandparent intent
+> **Implementation**: See [context-management.md](context-management.md#ancestor-allocation-with-decay) for the `allocate_ancestor_budget()` function.
 
 ### Summarization Levels
 
-Each ancestor is summarized to fit its budget. More budget = more detail:
+Each ancestor is summarized to fit its budget:
 
-```python
-def summarize_for_budget(node: WorkNode, token_budget: int) -> str:
-    """Summarize a node to fit within token budget."""
-
-    if token_budget >= 400:
-        # Full context: goal, all criteria, key constraints
-        return f"""
-        Goal: {node.goal.statement}
-        Criteria: {format_criteria(node.goal.acceptance_criteria)}
-        Key constraint: {get_key_constraint(node)}
-        """
-
-    elif token_budget >= 200:
-        # Medium context: goal, must-pass criteria only
-        must_pass = [c for c in node.goal.acceptance_criteria if c.must_pass]
-        return f"""
-        Goal: {node.goal.statement}
-        Must satisfy: {format_criteria(must_pass)}
-        """
-
-    elif token_budget >= 100:
-        # Compressed: goal summary + single constraint
-        return f"""
-        Goal: {summarize_goal(node.goal.statement, 60)}
-        Key: {get_key_constraint(node) or 'None'}
-        """
-
-    else:
-        # Minimal: just the goal essence
-        return summarize_goal(node.goal.statement, 40)
-```
+| Budget | Detail Level |
+|--------|--------------|
+| 400+ tokens | Full: goal, all criteria, key constraints |
+| 200-400 tokens | Medium: goal, must-pass criteria only |
+| 100-200 tokens | Compressed: goal summary + single constraint |
+| <100 tokens | Minimal: single sentence objective |
 
 ### Progressive Summarization
-
-As nodes complete, their context gets progressively summarized for use by descendants:
-
-```
-Depth 0 (root): Full goal statement + all criteria
-     ↓ summarized for depth 2+
-Depth 0 summary: Goal essence + must-pass only
-     ↓ further summarized for depth 4+
-Depth 0 micro: Single sentence objective
-
-Same pattern applies to each ancestor at each level.
-```
 
 **The "summary frontier"**: At any depth, you have:
 - Full detail for parent
@@ -728,141 +640,27 @@ Same pattern applies to each ancestor at each level.
 - Minimal detail for ancestors beyond that
 - Always some root context
 
-### Building the Goal Chain
-
-```python
-def build_goal_chain(node: WorkNode, load_fn, context_budget: int) -> GoalChain:
-    """Build goal chain with budget-aware summarization."""
-
-    # Calculate allocations
-    allocations = allocate_ancestor_budget(node.depth, total_budget=0.20)
-
-    # Walk up the tree
-    ancestors = []
-    current = node
-    level = 0
-
-    while current.parent:
-        parent = load_fn(current.parent)
-
-        # Determine budget for this level
-        if level == 0:
-            budget_fraction = allocations.get("parent", 0)
-        elif parent.parent is None:
-            budget_fraction = allocations.get("root", 0)
-        else:
-            budget_fraction = allocations.get(f"ancestor_{level}", 0)
-
-        token_budget = int(context_budget * budget_fraction)
-
-        # Summarize to fit budget
-        summary = summarize_for_budget(parent, token_budget)
-
-        ancestors.append(GoalChainEntry(
-            node_id=parent.id,
-            depth=parent.depth,
-            goal_summary=summary,
-            mode=parent.mode.value,
-            token_budget=token_budget,
-        ))
-
-        current = parent
-        level += 1
-
-    return GoalChain(
-        root=ancestors[-1] if ancestors else None,
-        ancestors=ancestors[:-1],  # Exclude root
-        current=make_current_entry(node),
-        total_depth=node.depth,
-    )
-```
-
 ### Evidence Selection
 
-The 15% evidence budget uses **semantic relevance**, not "include everything":
+Evidence budget uses **semantic relevance**, not "include everything":
+- Score each evidence item by relevance to current goal
+- Sort by relevance, take top items that fit budget
+- Stop if relevance drops below threshold (0.3)
 
-```python
-def select_evidence(node: WorkNode, evidence_pool: list[Evidence],
-                    token_budget: int) -> list[Evidence]:
-    """Select most relevant evidence for this node's goal."""
-
-    # Score each evidence item by relevance to current goal
-    scored = []
-    for ev in evidence_pool:
-        relevance = compute_semantic_similarity(
-            ev.summary,
-            node.goal.statement
-        )
-        scored.append((relevance, ev))
-
-    # Sort by relevance, take top items that fit budget
-    scored.sort(reverse=True, key=lambda x: x[0])
-
-    selected = []
-    used_tokens = 0
-
-    for relevance, ev in scored:
-        ev_tokens = estimate_tokens(ev.to_context())
-        if used_tokens + ev_tokens <= token_budget:
-            selected.append(ev)
-            used_tokens += ev_tokens
-
-        # Stop if relevance drops too low
-        if relevance < 0.3:
-            break
-
-    return selected
-```
+> **Implementation**: See [context-management.md](context-management.md) for `summarize_for_budget()`, `build_goal_chain()`, and `select_evidence()` functions.
 
 ### Output Collapse
 
-When a node completes, its internal trace collapses to a summary for parent consumption:
+When a node completes, its internal trace (10k+ tokens) collapses to a summary (~200 tokens):
 
-```python
-# Before collapse (full trace - could be 10k+ tokens)
-{
-    "id": "node-xyz",
-    "goal": "Evaluate ElevenLabs for children's TTS",
-    "criteria": [...],
-    "children": [...],      # Full child trees
-    "trace": [...],         # Execution log
-    "evidence": [...],      # All gathered evidence
-    "outputs": [...]
-}
-
-# After collapse (summary - ~200 tokens)
-{
-    "id": "node-xyz",
-    "status": "complete",
-    "confidence": 0.87,
-    "summary": "ElevenLabs suitable: good voice quality (4.2/5), acceptable cost ($0.008/min), stable API",
-    "key_findings": [
-        "Voice quality rated 4.2/5 in children's content test",
-        "Cost $0.008/minute within budget",
-        "99.9% uptime over past 6 months"
-    ],
-    "deliverable_ref": "outputs/elevenlabs-evaluation.md"
-}
-```
+**Before**: Full goal, all criteria, child trees, execution log, all evidence
+**After**: Status, confidence, summary, key findings, deliverable reference
 
 Parents see the summary. The full trace is persisted to disk but not loaded into context.
 
 ### Fail-Fast on Budget Overflow
 
-Before execution, validate that the prompt fits:
-
-```python
-def validate_context_budget(prompt: str, max_tokens: int) -> None:
-    """Fail fast if prompt exceeds budget."""
-    actual = estimate_tokens(prompt)
-    if actual > max_tokens:
-        raise ContextOverflowError(
-            f"Prompt ({actual} tokens) exceeds budget ({max_tokens}). "
-            f"Reduce evidence or increase summarization."
-        )
-```
-
-This prevents discovering overflow mid-execution.
+Before execution, validate that the prompt fits the budget. If it exceeds, raise `ContextOverflowError` before Claude invocation—don't discover overflow mid-execution.
 
 ---
 
@@ -872,35 +670,36 @@ GOTN is a **self-contained package** that orchestrates Claude Code via CLI. It i
 
 ### Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         GOTN Package                                │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  Python CLI (pip install gotn)                                     │
-│  ├── gotn init <goal>           # Create root node                 │
-│  ├── gotn run [--node X]        # Execute nodes                    │
-│  ├── gotn status [--json]       # Tree status                      │
-│  ├── gotn query ancestors       # Tier 2: ancestor context         │
-│  ├── gotn query claims          # Tier 2: sibling claims           │
-│  ├── gotn query siblings        # Tier 2: sibling outputs          │
-│  ├── gotn complete <node>       # Mark node complete               │
-│  └── gotn install [--global]    # Install skills/agents            │
-│                                                                     │
-│  Skills (.claude/skills/gotn/)                                     │
-│  └── SKILL.md                   # /gotn - main orchestration       │
-│                                                                     │
-│  Subagents (.claude/agents/)                                       │
-│  ├── gotn-epistemic.md          # Research execution               │
-│  ├── gotn-instrumental.md       # Build execution                  │
-│  ├── gotn-decision.md           # Decision execution               │
-│  └── gotn-validation.md         # Validation execution             │
-│                                                                     │
-│  Hooks (settings.json)                                             │
-│  ├── PreToolUse                 # Alignment validation             │
-│  └── SubagentStop               # Result aggregation               │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph CLI["Python CLI (pip install gotn)"]
+        direction TB
+        Init["gotn init"]
+        Run["gotn run"]
+        Status["gotn status"]
+        Query["gotn query"]
+        Install["gotn install"]
+    end
+
+    subgraph Skills["Skills (.claude/skills/gotn/)"]
+        SkillMD["SKILL.md<br/>/gotn orchestration"]
+    end
+
+    subgraph Agents["Subagents (.claude/agents/)"]
+        Epistemic["gotn-epistemic.md"]
+        Instrumental["gotn-instrumental.md"]
+        Decision["gotn-decision.md"]
+        Validation["gotn-validation.md"]
+    end
+
+    subgraph Hooks["Hooks (settings.json)"]
+        PreTool["PreToolUse<br/>Alignment validation"]
+        SubStop["SubagentStop<br/>Result aggregation"]
+    end
+
+    CLI --> Skills
+    Skills --> Agents
+    Agents --> Hooks
 ```
 
 ### CLI Invocation Pattern
@@ -1207,292 +1006,41 @@ We considered MCP servers for Tier 2 queries but rejected them:
 
 ## Data Strategy: Kuzu Graph Database
 
-GOTN's data model is naturally a graph - nodes with typed relationships, ancestry traversal, dependency edges. We use **Kuzu**, an embedded graph database, for storage and queries.
+GOTN uses **Kuzu**, an embedded graph database, for storage and queries. The data model naturally fits a graph - nodes with typed relationships, ancestry traversal, and dependency edges.
 
 ### Why Kuzu
 
 | Need | Solution |
 |------|----------|
-| Tree traversal (ancestors, descendants) | Native Cypher path queries |
-| Relationship queries (parent, children, enables) | Graph-native, O(1) edge traversal |
+| Tree traversal | Native Cypher path queries (`[:PARENT*]`) |
+| Relationship queries | Graph-native, O(1) edge traversal |
 | Embedded deployment | Single directory, no server |
 | Python integration | `pip install kuzu`, in-process |
 
-### Schema
+### Core Tables
 
-```cypher
--- Core node types
-CREATE NODE TABLE GoalCapsule(
-    id STRING,
-    root_goal STRING,
-    constraints STRING[],       -- Must-pass constraints
-    success_criteria STRING[],  -- Top-level success criteria
-    checksum STRING,            -- SHA256 for tamper detection
-    created_at TIMESTAMP,
-    PRIMARY KEY(id)
-)
+- **GoalCapsule** - Immutable root goal anchor with checksum
+- **WorkNode** - Goal, mode, status, depth, confidence, context policy
+- **Claim** - Proposition, confidence, domain, scope
+- **Evidence** - Content, summary, domain, strength
 
-CREATE NODE TABLE WorkNode(
-    id STRING,
-    goal STRING,
-    mode STRING,          -- epistemic, decision, instrumental, validation
-    status STRING,        -- pending, ready, running, blocked, complete, etc.
-    depth INT64,
-    confidence DOUBLE,
-    capsule_ref STRING,   -- Reference to GoalCapsule
-    context_policy STRING, -- JSON: tier1_budget, tier2_enabled, filter_script
-    contract STRING,       -- JSON: inputs, outputs, invariants
-    segment_mode BOOL,     -- Data recursion enabled
-    data STRING,          -- Full node JSON for complex fields
-    created_at TIMESTAMP,
-    PRIMARY KEY(id)
-)
+### Key Relationships
 
-CREATE NODE TABLE Claim(
-    id STRING,
-    proposition STRING,
-    confidence DOUBLE,
-    domain STRING,        -- api_documentation, configuration, experiment, etc.
-    scope STRING,         -- global, committed:decision-id, etc.
-    source_node STRING,
-    created_at TIMESTAMP,
-    PRIMARY KEY(id)
-)
-
-CREATE NODE TABLE Evidence(
-    id STRING,
-    content STRING,
-    summary STRING,       -- For Tier 2 queries
-    domain STRING,        -- technical, contextual, user_provided
-    strength DOUBLE,
-    created_at TIMESTAMP,
-    PRIMARY KEY(id)
-)
-
--- Relationships
-CREATE REL TABLE PARENT(FROM WorkNode TO WorkNode)
-CREATE REL TABLE SPAWNED_BY(FROM WorkNode TO WorkNode)
-CREATE REL TABLE DEPENDS_ON(FROM WorkNode TO WorkNode)
-CREATE REL TABLE ENABLES(FROM WorkNode TO WorkNode)
-CREATE REL TABLE HAS_CAPSULE(FROM WorkNode TO GoalCapsule)
-CREATE REL TABLE HAS_CLAIM(FROM WorkNode TO Claim)
-CREATE REL TABLE HAS_EVIDENCE(FROM WorkNode TO Evidence)
-CREATE REL TABLE SUPPORTS(FROM Evidence TO Claim)
-CREATE REL TABLE ANCHORED_TO(FROM WorkNode TO WorkNode)  -- production_anchor
-```
+- `PARENT` / `SPAWNED_BY` - Tree structure
+- `DEPENDS_ON` / `ENABLES` - DAG dependencies
+- `HAS_CAPSULE` / `ANCHORED_TO` - Goal anchoring
+- `HAS_CLAIM` / `HAS_EVIDENCE` / `SUPPORTS` - Evidence tracking
 
 ### Tier 2 Query Commands
 
-Nodes access the graph via CLI commands (invoked via Bash during execution):
-
 ```bash
-# Tier 2 queries - executed by the agent when additional context needed
-
-# Get ancestor goals and constraints
 gotn query ancestors [--depth-limit N] [--format compact|full]
-
-# Get claims from sibling/ancestor research
-gotn query claims [--domain X] [--min-confidence 0.5] [--scope "committed:*"]
-
-# Get committed decisions in ancestry
-gotn query decisions [--format summary]
-
-# Get outputs from sibling nodes
-gotn query siblings [--status complete] [--format summary]
-
-# Semantic search over evidence store
-gotn query evidence "<search query>" [--limit 10]
-
-# Get the goal capsule for this tree
+gotn query claims [--domain X] [--min-confidence 0.5]
+gotn query siblings [--status complete]
 gotn query capsule
 ```
 
-**Context-aware output**: Each query command respects a `--max-tokens` flag to control output size:
-
-```bash
-# Compact output for context-constrained situations
-gotn query ancestors --max-tokens 200
-
-# Full detail when budget allows
-gotn query ancestors --format full
-```
-
-**Example CLI implementations:**
-
-```python
-@app.command("query")
-def query_cmd():
-    """Tier 2 context queries."""
-    pass
-
-@query_cmd.command("ancestors")
-def query_ancestors(
-    depth_limit: Optional[int] = None,
-    format: str = "compact",
-    max_tokens: int = 500,
-    node: Optional[str] = None,  # Defaults to current node from env
-):
-    """Fetch ancestor goals and constraints."""
-    store = get_graph_store()
-    node_id = node or os.environ.get("GOTN_CURRENT_NODE")
-
-    ancestors = store.get_ancestors(node_id)
-
-    if format == "compact":
-        # Summarize to fit token budget
-        output = summarize_ancestors(ancestors, max_tokens)
-    else:
-        output = [a.to_dict() for a in ancestors]
-
-    console.print_json(data=output)
-
-@query_cmd.command("claims")
-def query_claims(
-    domain: Optional[str] = None,
-    min_confidence: float = 0.5,
-    scope: Optional[str] = None,
-    max_tokens: int = 500,
-):
-    """Fetch relevant claims from the evidence store."""
-    store = get_graph_store()
-
-    claims = store.query_claims(
-        domain=domain,
-        min_confidence=min_confidence,
-        scope_pattern=scope,
-    )
-
-    # Truncate to fit token budget
-    output = truncate_to_tokens(claims, max_tokens)
-    console.print_json(data=output)
-```
-
-### Key Queries
-
-```cypher
--- Get full ancestry (goal chain)
-MATCH (n:WorkNode {id: $node_id})-[:PARENT*]->(ancestor)
-RETURN ancestor.id, ancestor.goal, ancestor.depth
-ORDER BY ancestor.depth DESC
-
--- Get all descendants
-MATCH (n:WorkNode {id: $node_id})<-[:PARENT*]-(descendant)
-RETURN descendant
-
--- Find ready nodes (scheduling)
-MATCH (n:WorkNode {status: 'ready'})
-RETURN n ORDER BY n.depth DESC, n.created_at
-
--- Check if all children are terminal
-MATCH (parent:WorkNode {id: $node_id})<-[:PARENT]-(child)
-WHERE child.status NOT IN ['complete', 'failed', 'cancelled', 'degraded']
-RETURN count(child) AS pending_children
-
--- Find research anchored to a decision
-MATCH (research:WorkNode)-[:ANCHORED_TO]->(decision:WorkNode {mode: 'decision'})
-WHERE decision.id = $decision_id
-RETURN research
-
--- Validate no cycles (before adding edge)
-MATCH path = (target:WorkNode {id: $target_id})-[:DEPENDS_ON|PARENT*]->(source:WorkNode {id: $source_id})
-RETURN count(path) > 0 AS would_create_cycle
-```
-
-### Storage Layout
-
-```
-store/
-├── graph/                    # Kuzu database directory
-│   ├── nodes.kz
-│   ├── rels.kz
-│   └── ...
-├── outputs/                  # Large artifacts (not in graph)
-│   └── {node_id}/
-│       ├── result.md
-│       └── artifacts/
-└── cache/                    # Semantic cache (optional)
-    └── embeddings.kz         # Separate Kuzu DB for cache
-```
-
-### Context Fingerprinting
-
-With Kuzu, fingerprinting becomes a graph query:
-
-```cypher
--- Compute context fingerprint for cache lookup
-MATCH (n:WorkNode {id: $node_id})-[:PARENT*]->(root)
-WITH n, root, collect(root.id) AS ancestry
-MATCH (n)-[:ANCHORED_TO]->(anchor)
-RETURN
-    root.id AS root_id,
-    anchor.id AS anchor_id,
-    n.depth AS depth,
-    ancestry AS ancestor_chain
-```
-
-The fingerprint is: `hash(root_id + anchor_id + depth + constraint_hashes)`
-
-Same context = same fingerprint = safe to reuse cached research.
-
-### Python Integration
-
-```python
-import kuzu
-
-class GraphStore:
-    def __init__(self, path: str = "./store/graph"):
-        self.db = kuzu.Database(path)
-        self.conn = kuzu.Connection(self.db)
-        self._init_schema()
-
-    def get_ancestors(self, node_id: str) -> list[WorkNode]:
-        """Get full ancestry for goal chain."""
-        result = self.conn.execute("""
-            MATCH (n:WorkNode {id: $id})-[:PARENT*]->(ancestor)
-            RETURN ancestor.id, ancestor.goal, ancestor.depth, ancestor.data
-            ORDER BY ancestor.depth DESC
-        """, {"id": node_id})
-        return [self._to_worknode(row) for row in result]
-
-    def get_ready_nodes(self) -> list[WorkNode]:
-        """Get nodes ready for execution."""
-        result = self.conn.execute("""
-            MATCH (n:WorkNode {status: 'ready'})
-            RETURN n
-            ORDER BY n.depth DESC, n.created_at
-        """)
-        return [self._to_worknode(row) for row in result]
-
-    def spawn_child(self, parent_id: str, child: WorkNode) -> None:
-        """Create child node with parent relationship."""
-        self.conn.execute("""
-            CREATE (c:WorkNode {
-                id: $child_id,
-                goal: $goal,
-                mode: $mode,
-                status: 'pending',
-                depth: $depth,
-                data: $data
-            })
-        """, child.to_params())
-
-        self.conn.execute("""
-            MATCH (c:WorkNode {id: $child_id}), (p:WorkNode {id: $parent_id})
-            CREATE (c)-[:PARENT]->(p)
-            CREATE (c)-[:SPAWNED_BY]->(p)
-        """, {"child_id": child.id, "parent_id": parent_id})
-```
-
-### Benefits Over SQLite
-
-| Operation | SQLite | Kuzu |
-|-----------|--------|------|
-| Get ancestors | Recursive CTE (verbose) | `[:PARENT*]` (one line) |
-| Check cycles | Multiple queries | Single path query |
-| Find connected subgraph | Complex joins | Native traversal |
-| Add relationship types | Schema migration | Just add REL TABLE |
-
-The data model matches the domain, so queries are intuitive.
+> **Implementation**: See [graph-store.md](graph-store.md) for full Cypher schema, query examples, and Python integration.
 
 ---
 
@@ -1585,74 +1133,12 @@ claude plugin install gotn@gotn-plugin
 
 ### The `gotn install` Command
 
-```python
-@app.command("install")
-def install_integration(
-    global_: bool = typer.Option(False, "--global", "-g", help="Install to ~/.claude/"),
-    project: bool = typer.Option(False, "--project", "-p", help="Install to ./.claude/"),
-    hooks: bool = typer.Option(True, "--hooks/--no-hooks", help="Install hooks"),
-):
-    """Install GOTN skills, agents, and hooks into Claude Code."""
-    import shutil
-    from importlib.resources import files
-
-    # Determine target directory
-    if global_:
-        target = Path.home() / ".claude"
-    elif project:
-        target = Path.cwd() / ".claude"
-    else:
-        # Default to project if .claude exists, otherwise global
-        target = Path.cwd() / ".claude" if (Path.cwd() / ".claude").exists() else Path.home() / ".claude"
-
-    target.mkdir(parents=True, exist_ok=True)
-
-    # Copy skills
-    skills_src = files("gotn").joinpath("../skills")
-    skills_dst = target / "skills"
-    shutil.copytree(skills_src, skills_dst / "gotn", dirs_exist_ok=True)
-
-    # Copy agents
-    agents_src = files("gotn").joinpath("../agents")
-    agents_dst = target / "agents"
-    for agent_file in agents_src.iterdir():
-        shutil.copy(agent_file, agents_dst / agent_file.name)
-
-    # Merge hooks into settings.json
-    if hooks:
-        merge_hooks_config(target / "settings.json")
-
-    console.print(f"[green]GOTN installed to {target}[/green]")
-```
-
-### Plugin Manifest
-
-For Claude Code plugin marketplace distribution:
-
-```json
-// .claude-plugin/plugin.json
-{
-  "name": "gotn",
-  "version": "0.1.0",
-  "description": "Goal-Oriented Task Network orchestration for recursive goal decomposition",
-  "author": "mikewrather",
-  "homepage": "https://github.com/mikewrather/gotn",
-  "skills": ["gotn"],
-  "agents": [
-    "gotn-epistemic",
-    "gotn-instrumental",
-    "gotn-decision",
-    "gotn-validation"
-  ],
-  "commands": {
-    "postinstall": "pip install gotn && gotn install --project"
-  }
-}
-```
+Copies skills, agents, and hooks to the Claude Code configuration directory:
+- `--global` installs to `~/.claude/`
+- `--project` installs to `./.claude/`
+- Default: project if `.claude/` exists, otherwise global
 
 ### Environment Variables
-
-GOTN uses environment variables for execution context:
 
 | Variable | Purpose |
 |----------|---------|
@@ -1661,61 +1147,16 @@ GOTN uses environment variables for execution context:
 | `GOTN_CURRENT_TREE` | ID of current goal tree |
 | `GOTN_CAPSULE_ID` | ID of active goal capsule |
 
-These are set by the executor before invoking Claude:
-
-```python
-env = os.environ.copy()
-env["GOTN_STORE"] = str(self.store_path)
-env["GOTN_CURRENT_NODE"] = node.id
-env["GOTN_CURRENT_TREE"] = node.production_anchor or node.id
-env["GOTN_CAPSULE_ID"] = node.capsule_ref
-
-subprocess.run(cmd, env=env, ...)
-```
-
 ### Retry Logic
 
-CLI execution includes exponential backoff retry for transient failures:
+CLI execution includes exponential backoff (1s → 2s → 4s, max 30s) for transient failures:
 
-```python
-from gotn.executor import RetryConfig, ClaudeExecutor
-
-executor = ClaudeExecutor(
-    retry_config=RetryConfig(
-        max_retries=3,       # Up to 3 retry attempts
-        base_delay=1.0,      # 1 second initial delay
-        backoff_factor=2.0,  # Double each attempt: 1s → 2s → 4s
-        max_delay=30.0,      # Cap at 30 seconds
-    )
-)
-```
-
-**Retryable errors** (transient failures):
-- Rate limiting ("rate limit", "too many requests")
-- Connection errors (ECONNREFUSED, ETIMEDOUT, "connection refused")
-- Server errors (500, 502, 503, "overloaded")
-
-**Non-retryable errors** (permanent failures):
-- Timeouts (no retry, already waited)
-- Invalid input / authentication errors
-- Permission errors
+**Retryable**: Rate limits, connection errors, server errors (5xx)
+**Non-retryable**: Timeouts, auth errors, invalid input
 
 ### Tree Size Limits
 
-The scheduler enforces limits to prevent resource exhaustion:
-
-```python
-from gotn.scheduler import Scheduler, MAX_DEPTH, MAX_NODES
-
-scheduler = Scheduler(
-    state_manager,
-    max_depth=10,   # Default: MAX_DEPTH (10)
-    max_nodes=100,  # Default: MAX_NODES (100)
-)
-
-# Raises DepthLimitExceeded if child would exceed max_depth
-# Raises NodeLimitExceeded if tree would exceed max_nodes
-```
+The scheduler enforces `MAX_DEPTH=10` and `MAX_NODES=100` to prevent resource exhaustion. Raises `DepthLimitExceeded` or `NodeLimitExceeded` when limits would be breached.
 
 ### Version Compatibility
 
