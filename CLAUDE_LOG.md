@@ -160,3 +160,45 @@ $ gotn run --store /tmp/test2 --no-skills
 - Create skills/ and agents/ directories with actual files
 - Implement `gotn query` subcommands
 - Implement `gotn install` command
+
+## 2026-01-13: Architecture Review (Triad)
+
+### Review Method
+- **Agents**: Claude, Codex, Gemini (adversarial sequential)
+- **Turns**: 8
+- **Verdict**: Conceptually sound, implementation-incomplete
+
+### Critical Issues (P0)
+1. **Tier 2 queries blocked** - `gotn query` needs Bash, but epistemic/decision modes don't allow it
+2. **Shell injection in hooks** - Raw `$TOOL_INPUT` interpolation without escaping
+3. **Context management not implemented** - 3-tier strategy is docs-only
+4. **Self-attestation flaw** - Nodes can mark own criteria satisfied
+5. **Evidence fabrication** - Auto-created at 0.7 strength from model output
+
+### Major Issues (P1)
+- VOI gating documented but not enforced
+- Storage model inconsistent (Kuzu vs YAML)
+- Schema lacks criterion IDs (order-dependent)
+- CLI subprocess has no retry/recovery logic
+- Alignment threshold (0.3) gameable via keyword stuffing
+- MAX_DEPTH/MAX_NODES limits not enforced
+- Goal Capsule checksum insufficient (no signatures)
+
+### Strengths Confirmed
+- Self-similar WorkNode structure is elegant
+- Confidence aggregation model is sound
+- Shipping gates pattern prevents analysis paralysis
+- State machine design is clean
+- CLI + Skills + Subagents integration is pragmatic
+
+### Documentation
+- Full findings: `docs/architecture-review-2026-01-13.md`
+- Triad transcript: `.triad/runs/gotn-architecture-review/thread.jsonl`
+
+### Next Steps (Updated)
+1. **P0**: Fix Tier 2 query access for all node modes
+2. **P0**: Implement context budget tracking
+3. **P0**: Fix hook shell injection
+4. **P1**: Add criterion IDs to schema
+5. **P1**: Implement CLI retry logic
+6. **P1**: Enforce depth/node limits
