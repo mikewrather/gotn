@@ -245,3 +245,41 @@ The VoI-gated pre-fetch approach means:
 - No runtime queries needed (Bash not required for epistemic/decision modes)
 - Context budget enforced before Claude invocation
 - Tier 2 data fetched based on calculated value vs cost
+
+## 2026-01-13: P1 Issues Fixed
+
+### Completed
+
+1. **Criterion IDs in Schema** (`src/gotn/executor.py`)
+   - `_build_criteria_section()` now includes criterion IDs in bold for easy reference
+   - `_build_output_format()` lists valid criterion IDs and requires exact ID matching
+   - Prompts now show: `- [ ] **crit-abc123**: Description (type: knowledge)`
+   - Output format includes: `Valid criterion IDs for this node: ["crit-abc123", "crit-def456"]`
+
+2. **CLI Retry Logic** (`src/gotn/executor.py`)
+   - Added `RetryConfig` dataclass with exponential backoff configuration
+   - Added `with_retry()` helper for transient failure handling
+   - Added `RetryableError` exception for retry-eligible failures
+   - `_run_skill()` and `_run_claude()` now use retry logic
+   - `_is_retryable_error()` identifies transient failures:
+     - Rate limiting, connection errors, server errors (5xx)
+     - NOT retried: invalid input, auth errors, timeouts
+
+### Test Results
+- 54 tests passing (12 alignment + 17 context + 13 executor + 10 scheduler + 7 state)
+
+### Retry Configuration Defaults
+```python
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BASE_DELAY = 1.0  # seconds
+DEFAULT_MAX_DELAY = 30.0  # seconds
+DEFAULT_BACKOFF_FACTOR = 2.0
+```
+
+### All P0/P1 Items Complete
+- [x] P0: Tier 2 query access (VoI pre-fetch)
+- [x] P0: Context budget tracking
+- [x] P0: Shell injection fix
+- [x] P1: Criterion IDs in schema
+- [x] P1: CLI retry logic
+- [x] P1: Depth/node limits

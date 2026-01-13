@@ -1,14 +1,20 @@
 """Claude Code executor for WorkNode execution."""
 
 import json
+import logging
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 import yaml
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 from gotn.context import BuiltContext, ContextBudget, build_execution_context
 from gotn.node import (
@@ -25,6 +31,82 @@ from gotn.tools import (
     should_use_deep_research,
     should_use_triad,
 )
+
+
+# Retry configuration defaults
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BASE_DELAY = 1.0  # seconds
+DEFAULT_MAX_DELAY = 30.0  # seconds
+DEFAULT_BACKOFF_FACTOR = 2.0
+
+
+@dataclass
+class RetryConfig:
+    """Configuration for retry behavior."""
+
+    max_retries: int = DEFAULT_MAX_RETRIES
+    base_delay: float = DEFAULT_BASE_DELAY
+    max_delay: float = DEFAULT_MAX_DELAY
+    backoff_factor: float = DEFAULT_BACKOFF_FACTOR
+
+    def get_delay(self, attempt: int) -> float:
+        """Calculate delay for a given attempt using exponential backoff."""
+        delay = self.base_delay * (self.backoff_factor ** attempt)
+        return min(delay, self.max_delay)
+
+
+class RetryableError(Exception):
+    """Error that should trigger a retry."""
+
+    def __init__(self, message: str, original_error: Optional[Exception] = None):
+        super().__init__(message)
+        self.original_error = original_error
+
+
+def with_retry(
+    func: Callable[[], T],
+    config: RetryConfig,
+    operation_name: str = "operation",
+) -> T:
+    """Execute a function with exponential backoff retry.
+
+    Args:
+        func: Function to execute (should raise RetryableError on transient failures)
+        config: Retry configuration
+        operation_name: Name for logging
+
+    Returns:
+        Result of successful function execution
+
+    Raises:
+        The last exception if all retries exhausted
+    """
+    last_error: Optional[Exception] = None
+
+    for attempt in range(config.max_retries + 1):
+        try:
+            return func()
+        except RetryableError as e:
+            last_error = e.original_error or e
+            if attempt < config.max_retries:
+                delay = config.get_delay(attempt)
+                logger.warning(
+                    f"{operation_name} failed (attempt {attempt + 1}/{config.max_retries + 1}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+            else:
+                logger.error(
+                    f"{operation_name} failed after {config.max_retries + 1} attempts: {e}"
+                )
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            # Don't retry timeouts or user interrupts
+            raise
+
+    # Should not reach here, but raise last error if we do
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"{operation_name} failed with no error captured")
 
 
 @dataclass
@@ -101,7 +183,7 @@ class PromptBuilder:
         context_section = self._build_context_section(node, context)
         evidence_section = self._build_evidence_section(context)
         instructions_section = self._build_instructions(node)
-        output_section = self._build_output_format()
+        output_section = self._build_output_format(node)
 
         if template:
             return template.format(
@@ -150,14 +232,18 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _build_criteria_section(self, node: WorkNode) -> str:
-        """Build the criteria section of the prompt."""
+        """Build the criteria section of the prompt.
+
+        Includes criterion IDs that must be referenced in output.
+        """
         lines = []
         for criterion in node.goal.acceptance_criteria:
             status = "[x]" if criterion.satisfied else "[ ]"
             must_pass = " (REQUIRED)" if criterion.must_pass else ""
             confidence = f" [{criterion.confidence:.0%}]" if criterion.confidence > 0 else ""
+            # Include criterion ID for output referencing
             lines.append(
-                f"- {status} {criterion.description} "
+                f"- {status} **{criterion.id}**: {criterion.description} "
                 f"(type: {criterion.type.value}){must_pass}{confidence}"
             )
         return "\n".join(lines) or "- No specific criteria defined"
@@ -251,9 +337,22 @@ class PromptBuilder:
         instructions = base_instructions + ["", "---", "", tool_instructions]
         return "\n".join(instructions)
 
-    def _build_output_format(self) -> str:
-        """Build the expected output format."""
-        return """Return a structured YAML block at the end of your response:
+    def _build_output_format(self, node: WorkNode) -> str:
+        """Build the expected output format with actual criterion IDs.
+
+        Includes the node's criterion IDs to ensure correct referencing.
+        """
+        # Build criterion ID reference list
+        criterion_ids = [c.id for c in node.goal.acceptance_criteria]
+        criterion_id_list = ", ".join(f'"{cid}"' for cid in criterion_ids)
+
+        # Build example with first actual criterion ID
+        example_id = criterion_ids[0] if criterion_ids else "crit-xxx"
+
+        return f"""Return a structured YAML block at the end of your response.
+
+**IMPORTANT**: Use the exact criterion IDs from the Acceptance Criteria section above.
+Valid criterion IDs for this node: [{criterion_id_list}]
 
 ```yaml
 claims:
@@ -262,8 +361,8 @@ claims:
     evidence_ids: [ev-001]
     domain: general
 
-criterion_status:
-  - id: "crit-xxx"
+criterion_status:  # Use EXACT criterion IDs from above
+  - id: "{example_id}"  # Must match an ID from the criteria list
     satisfied: true
     confidence: 0.9
 
@@ -299,11 +398,13 @@ class ClaudeExecutor:
         claude_path: str = "claude",
         default_timeout_ms: int = 120000,
         prefer_skills: bool = True,
+        retry_config: Optional[RetryConfig] = None,
     ):
         self.prompt_builder = PromptBuilder(prompts_dir)
         self.claude_path = claude_path
         self.default_timeout_ms = default_timeout_ms
         self.prefer_skills = prefer_skills
+        self.retry_config = retry_config or RetryConfig()
 
     def determine_strategy(
         self,
@@ -407,7 +508,7 @@ class ClaudeExecutor:
         skill_args: str,
         timeout_seconds: float,
     ) -> tuple[str, int]:
-        """Run a Claude Code skill.
+        """Run a Claude Code skill with retry logic.
 
         Returns (output, tokens_used).
         """
@@ -421,12 +522,29 @@ class ClaudeExecutor:
             prompt,
         ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=True,
+        def execute():
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=True,
+                )
+                return result
+            except subprocess.CalledProcessError as e:
+                # Retry on transient failures (non-zero exit codes)
+                if self._is_retryable_error(e):
+                    raise RetryableError(
+                        f"Skill execution failed: {e.stderr or e.returncode}",
+                        original_error=e,
+                    )
+                raise
+
+        result = with_retry(
+            execute,
+            self.retry_config,
+            operation_name=f"skill:{skill_name}",
         )
 
         tokens_used = len(prompt) // 4 + len(result.stdout) // 4
@@ -438,7 +556,7 @@ class ClaudeExecutor:
         timeout_seconds: float,
         max_turns: int,
     ) -> tuple[str, int]:
-        """Run Claude Code subprocess.
+        """Run Claude Code subprocess with retry logic.
 
         Returns (output, tokens_used).
         """
@@ -451,18 +569,82 @@ class ClaudeExecutor:
             prompt,
         ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=True,
+        def execute():
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=True,
+                )
+                return result
+            except subprocess.CalledProcessError as e:
+                # Retry on transient failures
+                if self._is_retryable_error(e):
+                    raise RetryableError(
+                        f"Claude execution failed: {e.stderr or e.returncode}",
+                        original_error=e,
+                    )
+                raise
+
+        result = with_retry(
+            execute,
+            self.retry_config,
+            operation_name="claude",
         )
 
         # Estimate tokens (rough: ~4 chars per token)
         tokens_used = len(prompt) // 4 + len(result.stdout) // 4
 
         return result.stdout, tokens_used
+
+    def _is_retryable_error(self, error: subprocess.CalledProcessError) -> bool:
+        """Determine if an error is retryable.
+
+        Retries on transient failures like:
+        - Network/connection errors
+        - Rate limiting (429)
+        - Server errors (5xx)
+        - Temporary unavailability
+
+        Does NOT retry on:
+        - Invalid input (permanent failure)
+        - Authentication errors
+        - Permission errors
+        """
+        stderr = error.stderr or ""
+        returncode = error.returncode
+
+        # Common retryable patterns in stderr
+        retryable_patterns = [
+            "rate limit",
+            "too many requests",
+            "temporarily unavailable",
+            "connection refused",
+            "connection reset",
+            "timeout",
+            "ECONNREFUSED",
+            "ETIMEDOUT",
+            "network",
+            "503",
+            "502",
+            "500",
+            "overloaded",
+        ]
+
+        stderr_lower = stderr.lower()
+        for pattern in retryable_patterns:
+            if pattern.lower() in stderr_lower:
+                return True
+
+        # Retry on generic transient exit codes
+        # Exit code 1 could be many things; be conservative
+        # Exit codes > 128 usually indicate signals
+        if returncode in (75, 69):  # EX_TEMPFAIL, EX_UNAVAILABLE
+            return True
+
+        return False
 
     def _parse_result(self, output: str, node: WorkNode) -> NodeResult:
         """Parse structured output from Claude response."""
