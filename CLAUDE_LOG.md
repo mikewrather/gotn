@@ -202,3 +202,46 @@ $ gotn run --store /tmp/test2 --no-skills
 4. **P1**: Add criterion IDs to schema
 5. **P1**: Implement CLI retry logic
 6. **P1**: Enforce depth/node limits
+
+## 2026-01-13: P0 Critical Issues Fixed
+
+### Completed
+
+1. **Three-Tier Context Management** (`src/gotn/context.py`) - New module implementing:
+   - `ContextBudget` - Token budget allocation across tiers (8% Tier 1, 20% Tier 2, 60% work, 12% reserve)
+   - `VoIFactors` - Value of Information calculation: `(uncertainty × decision_impact) / query_cost`
+   - `GoalCapsule` - Immutable goal anchor with SHA256 checksum
+   - `ContextBuilder` - Pre-fetches Tier 2 data based on VoI before Claude execution
+   - **Solves P0 #1**: Tier 2 queries now pre-fetched, eliminating need for runtime Bash access
+
+2. **Executor Integration** (`src/gotn/executor.py`)
+   - `ExecutionContext` now supports `built_context` for three-tier model
+   - `PromptBuilder._build_context_section()` renders Tier 1+2 context with VoI scores
+   - `create_execution_context_with_tiers()` convenience function for full context building
+   - **Solves P0 #2**: Context budget tracking implemented with hard limits
+
+3. **Scheduler Limits** (`src/gotn/scheduler.py`)
+   - Added `MAX_DEPTH = 10` and `MAX_NODES = 100` defaults
+   - Added `DepthLimitExceeded` and `NodeLimitExceeded` exceptions
+   - `spawn_child()` now enforces limits before creating children
+   - Configurable via `max_depth` and `max_nodes` parameters
+   - **Solves P1 #6**: Unbounded child spawning now blocked
+
+4. **Shell Injection Fix** (`docs/architecture.md`)
+   - Hooks now use stdin JSON instead of `$TOOL_INPUT` interpolation
+   - Added security note about CWE-78 prevention
+   - Documented stdin JSON format for hooks
+   - **Solves P0 #3**: Shell injection vulnerability eliminated
+
+### Test Results
+- 41 tests passing (12 alignment + 17 context + 10 scheduler + 7 state)
+
+### Remaining P0/P1 Items
+- **P1**: Add criterion IDs to schema
+- **P1**: Implement CLI retry logic with exponential backoff
+
+### Architecture Alignment
+The VoI-gated pre-fetch approach means:
+- No runtime queries needed (Bash not required for epistemic/decision modes)
+- Context budget enforced before Claude invocation
+- Tier 2 data fetched based on calculated value vs cost

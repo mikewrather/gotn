@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from gotn.node import NodeMode, NodeStatus, WorkNode
-from gotn.scheduler import CycleDetected, Scheduler
+from gotn.scheduler import CycleDetected, DepthLimitExceeded, NodeLimitExceeded, Scheduler
 from gotn.state import StateManager
 
 
@@ -147,3 +147,97 @@ class TestScheduler:
             assert stats["total_nodes"] == 3
             assert stats["by_status"]["ready"] == 3
             assert stats["by_mode"]["epistemic"] == 3
+
+    def test_depth_limit_enforced(self):
+        """Test that depth limit is enforced when spawning children."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store_path = Path(tmpdir)
+            manager = StateManager(store_path)
+            scheduler = make_scheduler(manager, max_depth=2)
+
+            # Create root at depth 0
+            root = WorkNode.create_root("Root goal statement", mode=NodeMode.EPISTEMIC)
+            root.status = NodeStatus.RUNNING
+            manager.create_node(root)
+
+            # Spawn child at depth 1 (ok)
+            child = scheduler.spawn_child(
+                root,
+                NodeMode.EPISTEMIC,
+                "Child goal statement",
+            )
+            child.status = NodeStatus.RUNNING
+            manager.save_node(child)
+
+            # Spawn grandchild at depth 2 (ok)
+            grandchild = scheduler.spawn_child(
+                child,
+                NodeMode.EPISTEMIC,
+                "Grandchild goal statement",
+            )
+            grandchild.status = NodeStatus.RUNNING
+            manager.save_node(grandchild)
+
+            # Spawn great-grandchild at depth 3 (should fail)
+            with pytest.raises(DepthLimitExceeded) as exc_info:
+                scheduler.spawn_child(
+                    grandchild,
+                    NodeMode.EPISTEMIC,
+                    "Great-grandchild goal statement",
+                )
+
+            assert exc_info.value.current_depth == 2
+            assert exc_info.value.max_depth == 2
+
+    def test_node_limit_enforced(self):
+        """Test that node count limit is enforced."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store_path = Path(tmpdir)
+            manager = StateManager(store_path)
+            scheduler = make_scheduler(manager, max_nodes=3)
+
+            # Create root (1 node)
+            root = WorkNode.create_root("Root goal statement", mode=NodeMode.EPISTEMIC)
+            root.status = NodeStatus.RUNNING
+            manager.create_node(root)
+
+            # Spawn child (2 nodes)
+            child1 = scheduler.spawn_child(
+                root,
+                NodeMode.EPISTEMIC,
+                "First child goal",
+            )
+
+            # Spawn another child (3 nodes)
+            child2 = scheduler.spawn_child(
+                root,
+                NodeMode.EPISTEMIC,
+                "Second child goal",
+            )
+
+            # Third child should fail (would be 4 nodes)
+            with pytest.raises(NodeLimitExceeded) as exc_info:
+                scheduler.spawn_child(
+                    root,
+                    NodeMode.EPISTEMIC,
+                    "Third child goal",
+                )
+
+            assert exc_info.value.current_count == 3
+            assert exc_info.value.max_nodes == 3
+
+    def test_limits_configurable(self):
+        """Test that limits can be configured on scheduler creation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store_path = Path(tmpdir)
+            manager = StateManager(store_path)
+
+            scheduler = Scheduler(
+                manager,
+                enforce_alignment=False,
+                max_depth=5,
+                max_nodes=50,
+            )
+
+            assert scheduler.max_depth == 5
+            assert scheduler.max_nodes == 50

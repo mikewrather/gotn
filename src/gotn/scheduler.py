@@ -11,6 +11,11 @@ from gotn.node import EdgeType, NodeMode, NodeStatus, TypedEdge, WorkNode
 from gotn.state import StateManager
 
 
+# Default limits for tree size
+MAX_DEPTH = 10  # Maximum tree depth
+MAX_NODES = 100  # Maximum total nodes in tree
+
+
 @dataclass
 class CycleDetected(Exception):
     """Raised when adding an edge would create a cycle."""
@@ -26,6 +31,30 @@ class CycleDetected(Exception):
         super().__init__(
             f"Adding edge {source_id} -> {target_id} would create cycle: "
             f"{' -> '.join(cycle_path)}"
+        )
+
+
+class DepthLimitExceeded(Exception):
+    """Raised when spawning would exceed maximum tree depth."""
+
+    def __init__(self, current_depth: int, max_depth: int):
+        self.current_depth = current_depth
+        self.max_depth = max_depth
+        super().__init__(
+            f"Cannot spawn child at depth {current_depth + 1}: "
+            f"exceeds maximum depth of {max_depth}"
+        )
+
+
+class NodeLimitExceeded(Exception):
+    """Raised when spawning would exceed maximum node count."""
+
+    def __init__(self, current_count: int, max_nodes: int):
+        self.current_count = current_count
+        self.max_nodes = max_nodes
+        super().__init__(
+            f"Cannot spawn child: tree has {current_count} nodes, "
+            f"maximum is {max_nodes}"
         )
 
 
@@ -56,6 +85,8 @@ class Scheduler:
         on_node_complete: Optional[Callable[[WorkNode], None]] = None,
         alignment_threshold: float = 0.3,
         enforce_alignment: bool = True,
+        max_depth: int = MAX_DEPTH,
+        max_nodes: int = MAX_NODES,
     ):
         self.state = state
         self.max_concurrent = max_concurrent
@@ -63,6 +94,8 @@ class Scheduler:
         self._priority_queue: list[PriorityItem] = []
         self._on_node_complete = on_node_complete
         self.enforce_alignment = enforce_alignment
+        self.max_depth = max_depth
+        self.max_nodes = max_nodes
         self.alignment_monitor = AlignmentMonitor(
             load_node_fn=state.load_node,
             alignment_threshold=alignment_threshold,
@@ -180,6 +213,8 @@ class Scheduler:
         Raises:
             CycleDetected: If this would create a cycle
             ValueError: If child goal doesn't align with tree objectives
+            DepthLimitExceeded: If child would exceed max depth
+            NodeLimitExceeded: If tree would exceed max nodes
         """
         from gotn.node import (
             Budget,
@@ -189,6 +224,16 @@ class Scheduler:
             Goal,
             generate_id,
         )
+
+        # Check depth limit before spawning
+        child_depth = parent.depth + 1
+        if child_depth > self.max_depth:
+            raise DepthLimitExceeded(parent.depth, self.max_depth)
+
+        # Check node count limit before spawning
+        total_nodes = len(self.state.get_all_nodes())
+        if total_nodes >= self.max_nodes:
+            raise NodeLimitExceeded(total_nodes, self.max_nodes)
 
         # Check alignment before spawning
         if self.enforce_alignment and not skip_alignment_check:

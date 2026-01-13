@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import yaml
 
+from gotn.context import BuiltContext, ContextBudget, build_execution_context
 from gotn.node import (
     Claim,
     ClaimDomain,
@@ -62,12 +63,25 @@ class NodeResult:
 
 @dataclass
 class ExecutionContext:
-    """Context for node execution."""
+    """Context for node execution.
 
+    Now integrates with the three-tier context model via BuiltContext.
+    Legacy fields maintained for backwards compatibility.
+    """
+
+    # Legacy fields (backwards compat)
     parent_goal: Optional[str] = None
     sibling_claims: list[Claim] = field(default_factory=list)
     available_evidence: list[Evidence] = field(default_factory=list)
     max_depth: int = 5
+
+    # New three-tier context (preferred)
+    built_context: Optional[BuiltContext] = None
+
+    @property
+    def has_built_context(self) -> bool:
+        """Check if three-tier context is available."""
+        return self.built_context is not None
 
 
 class PromptBuilder:
@@ -149,7 +163,10 @@ class PromptBuilder:
         return "\n".join(lines) or "- No specific criteria defined"
 
     def _build_context_section(self, node: WorkNode, context: ExecutionContext) -> str:
-        """Build the context section of the prompt."""
+        """Build the context section of the prompt.
+
+        Uses three-tier context when available, falls back to legacy.
+        """
         lines = [
             f"- Mode: {node.mode.value}",
             f"- Depth: {node.depth} / {context.max_depth}",
@@ -167,23 +184,51 @@ class PromptBuilder:
             remaining = node.budget.steps - node.resource_usage.steps
             lines.append(f"- Step budget: {remaining} remaining")
 
-        if context.parent_goal:
-            lines.append(f"- Parent goal: {context.parent_goal}")
+        # Use three-tier context if available
+        if context.has_built_context:
+            bc = context.built_context
+            lines.append("")
+            lines.append("### Three-Tier Context")
+            lines.append(bc.to_prompt_section())
+
+            # Add VoI scores for transparency
+            if bc.voi_scores:
+                voi_text = ", ".join(f"{k}={v:.2f}" for k, v in bc.voi_scores.items())
+                lines.append(f"- VoI scores: {voi_text}")
+        else:
+            # Legacy context
+            if context.parent_goal:
+                lines.append(f"- Parent goal: {context.parent_goal}")
 
         return "\n".join(lines)
 
     def _build_evidence_section(self, context: ExecutionContext) -> str:
-        """Build the evidence section of the prompt."""
-        if not context.available_evidence:
+        """Build the evidence section of the prompt.
+
+        Combines legacy evidence with Tier 2 claims when available.
+        """
+        lines = []
+
+        # Legacy evidence
+        if context.available_evidence:
+            for ev in context.available_evidence:
+                recency = ev.recency.strftime("%Y-%m-%d") if ev.recency else "unknown"
+                lines.append(
+                    f"- [{ev.id}] {ev.summary} "
+                    f"(strength: {ev.strength:.0%}, recency: {recency})"
+                )
+
+        # Tier 2 related evidence (from built context)
+        if context.has_built_context:
+            bc = context.built_context
+            if bc.tier2.related_evidence:
+                lines.append("\n### Related Evidence (Tier 2)")
+                for ev in bc.tier2.related_evidence[:5]:
+                    lines.append(f"- [{ev.id}] {ev.summary} ({ev.strength:.0%})")
+
+        if not lines:
             return "No prior evidence available."
 
-        lines = []
-        for ev in context.available_evidence:
-            recency = ev.recency.strftime("%Y-%m-%d") if ev.recency else "unknown"
-            lines.append(
-                f"- [{ev.id}] {ev.summary} "
-                f"(strength: {ev.strength:.0%}, recency: {recency})"
-            )
         return "\n".join(lines)
 
     def _build_instructions(self, node: WorkNode) -> str:
@@ -641,3 +686,49 @@ def _update_aggregated_confidence(node: WorkNode) -> None:
             c.id: c.confidence for c in node.goal.acceptance_criteria
         }
         node.confidence.last_computed = datetime.now()
+
+
+def create_execution_context_with_tiers(
+    node: WorkNode,
+    state_manager,
+    max_depth: int = 5,
+    context_budget: int = 8000,
+) -> ExecutionContext:
+    """Create ExecutionContext with three-tier context pre-fetched.
+
+    This is the preferred way to create execution context as it
+    pre-fetches Tier 2 data based on VoI, eliminating the need for
+    runtime queries.
+
+    Args:
+        node: Node to execute
+        state_manager: StateManager for loading related nodes
+        max_depth: Maximum tree depth
+        context_budget: Total token budget for context
+
+    Returns:
+        ExecutionContext with built_context populated
+    """
+    # Build three-tier context
+    built = build_execution_context(
+        node=node,
+        state_manager=state_manager,
+        total_budget=context_budget,
+    )
+
+    # Also populate legacy fields for backwards compatibility
+    parent_goal = None
+    if node.parent:
+        try:
+            parent = state_manager.load_node(node.parent)
+            parent_goal = parent.goal.statement
+        except FileNotFoundError:
+            pass
+
+    return ExecutionContext(
+        parent_goal=parent_goal,
+        sibling_claims=built.tier2.sibling_claims,
+        available_evidence=built.tier2.related_evidence,
+        max_depth=max_depth,
+        built_context=built,
+    )

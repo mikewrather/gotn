@@ -1111,7 +1111,11 @@ Query for relevant decisions and constraints:
 
 ### Hooks
 
-Hooks provide lifecycle integration without consuming context:
+Hooks provide lifecycle integration without consuming context.
+
+**SECURITY NOTE**: Hook commands receive input via **stdin as JSON** to prevent shell injection (CWE-78).
+Environment variables like `$TOOL_INPUT` should NEVER be interpolated directly into command strings.
+The hook command reads structured JSON from stdin and parses it safely.
 
 ```json
 {
@@ -1119,24 +1123,38 @@ Hooks provide lifecycle integration without consuming context:
     "PreToolUse": [
       {
         "matcher": "Write",
-        "command": "gotn hooks validate-alignment --tool-input \"$TOOL_INPUT\"",
+        "command": "gotn hooks validate-alignment",
+        "input": "stdin",
         "description": "Validate file writes align with goal constraints"
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Bash",
-        "command": "gotn hooks track-execution --tool \"$TOOL_NAME\" --result \"$TOOL_RESULT\"",
+        "command": "gotn hooks track-execution",
+        "input": "stdin",
         "description": "Track tool execution for resource accounting"
       }
     ],
     "SubagentStop": [
       {
-        "command": "gotn hooks aggregate-result --subagent \"$SUBAGENT_TYPE\" --result \"$SUBAGENT_RESULT\"",
+        "command": "gotn hooks aggregate-result",
+        "input": "stdin",
         "description": "Aggregate subagent outputs into parent node"
       }
     ]
   }
+}
+```
+
+**Stdin JSON format** (provided by Claude Code):
+```json
+{
+  "tool_name": "Write",
+  "tool_input": {"file_path": "/path/to/file", "content": "..."},
+  "tool_result": "...",
+  "session_id": "...",
+  "node_context": {"id": "node-xxx", "mode": "instrumental"}
 }
 ```
 
