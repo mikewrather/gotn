@@ -295,3 +295,31 @@ DEFAULT_BACKOFF_FACTOR = 2.0
 - **All P0/P1 issues addressed** - Ready for integration testing
 - **54 tests passing** across all modules
 - **Documentation aligned** with implementation
+
+## 2026-01-13: Documentation Restructure
+
+### Completed
+- **Mermaid diagrams** added to `docs/architecture.md`:
+  - Recursive workflow flowchart
+  - Node flow (Epistemic → Decision → Instrumental → Validation)
+  - Three-tier context diagram
+  - Context budget pie chart
+  - Hybrid composition diagram
+  - Architecture overview
+
+- **New spec docs** created:
+  - `docs/context-management.md` - Budget allocation, VoI, summarization code
+  - `docs/graph-store.md` - Kuzu schema, queries, Python integration
+
+- **architecture.md simplified**:
+  - Code blocks moved to spec docs
+  - References added for implementation details
+  - Kept as high-level conceptual overview
+
+### Documentation Structure
+- `architecture.md` - Conceptual overview with diagrams
+- `worknode-schema.md` - Data model (TypeScript, JSON Schema)
+- `mechanisms.md` - Control mechanisms (Python)
+- `context-management.md` - Context budget and VoI (Python)
+- `graph-store.md` - Kuzu integration (Cypher, Python)
+- `llm-integration.md` - Claude Code integration (Skills, CLI)
