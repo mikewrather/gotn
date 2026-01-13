@@ -283,3 +283,15 @@ DEFAULT_BACKOFF_FACTOR = 2.0
 - [x] P1: Criterion IDs in schema
 - [x] P1: CLI retry logic
 - [x] P1: Depth/node limits
+
+## 2026-01-13: Documentation Sync
+
+### Completed
+- Updated `docs/architecture.md` with implementation status section
+- Updated `docs/architecture-review-2026-01-13.md` with resolution status tables
+- Added installation and quick start to `README.md`
+
+### Status
+- **All P0/P1 issues addressed** - Ready for integration testing
+- **54 tests passing** across all modules
+- **Documentation aligned** with implementation
