@@ -24,7 +24,30 @@ docs/
     └── bedtime-story-pipeline.md
 ```
 
+## Installation
+
+```bash
+# Clone and install
+git clone https://github.com/yourusername/gotn.git
+cd gotn
+uv venv && uv pip install -e ".[dev]"
+
+# Or with pip
+pip install -e ".[dev]"
+```
+
 ## Quick Start
+
+```bash
+# Initialize a root goal
+gotn init "Research Python web frameworks and recommend one" --mode epistemic
+
+# Run execution (processes ready nodes)
+gotn run
+
+# Check status
+gotn status --tree
+```
 
 See [docs/architecture.md](docs/architecture.md) for the full specification.
 

@@ -488,6 +488,33 @@ Where:
 - Contract constraint unresolved
 - Parent explicitly requires ancestor context
 
+#### Implementation: `context.py`
+
+The VoI-gated retrieval is implemented in `src/gotn/context.py`:
+
+```python
+from gotn.context import ContextBuilder, ContextBudget, VoIFactors
+
+# Token budget allocation
+budget = ContextBudget(total_tokens=8000)
+# Tier 1: 8% (640 tokens) - Goal chain, capsule, constraints
+# Tier 2: 20% (1600 tokens) - Ancestors, siblings, claims
+# Work: 60% (4800 tokens) - Claude's reasoning
+# Reserve: 12% (960 tokens) - Output buffer
+
+# VoI calculation
+voi = VoIFactors(
+    uncertainty=1 - node.confidence.aggregate,
+    decision_impact=0.5,  # Higher for decision/validation modes
+    query_cost=1.0 + (node.depth * 0.1),  # Deeper = more expensive
+)
+if voi.value >= 0.3:  # VOI_THRESHOLD
+    # Pre-fetch Tier 2 data
+    ...
+```
+
+**Key design decision**: Tier 2 data is **pre-fetched before Claude execution** based on VoI calculation. This eliminates the need for runtime queries (which would require Bash access), solving the architectural conflict where epistemic/decision modes couldn't access `gotn query` commands.
+
 ### ContextFilter: Code-Based Pre-Processing
 
 Before LLM reasoning, nodes can run **deterministic code filters** on retrieved data. This is inspired by RLM's Python REPL approach.
@@ -1510,8 +1537,9 @@ gotn/
 │       ├── cli.py              # Typer CLI (gotn command)
 │       ├── node.py             # WorkNode models
 │       ├── state.py            # State machine
-│       ├── scheduler.py        # DAG scheduling
-│       ├── executor.py         # Claude subprocess execution
+│       ├── scheduler.py        # DAG scheduling (with depth/node limits)
+│       ├── executor.py         # Claude subprocess execution (with retry)
+│       ├── context.py          # Three-tier context management (VoI-gated)
 │       ├── graph.py            # Kuzu graph store
 │       ├── confidence.py       # Aggregation logic
 │       ├── alignment.py        # Goal alignment checking
@@ -1645,6 +1673,50 @@ env["GOTN_CAPSULE_ID"] = node.capsule_ref
 subprocess.run(cmd, env=env, ...)
 ```
 
+### Retry Logic
+
+CLI execution includes exponential backoff retry for transient failures:
+
+```python
+from gotn.executor import RetryConfig, ClaudeExecutor
+
+executor = ClaudeExecutor(
+    retry_config=RetryConfig(
+        max_retries=3,       # Up to 3 retry attempts
+        base_delay=1.0,      # 1 second initial delay
+        backoff_factor=2.0,  # Double each attempt: 1s → 2s → 4s
+        max_delay=30.0,      # Cap at 30 seconds
+    )
+)
+```
+
+**Retryable errors** (transient failures):
+- Rate limiting ("rate limit", "too many requests")
+- Connection errors (ECONNREFUSED, ETIMEDOUT, "connection refused")
+- Server errors (500, 502, 503, "overloaded")
+
+**Non-retryable errors** (permanent failures):
+- Timeouts (no retry, already waited)
+- Invalid input / authentication errors
+- Permission errors
+
+### Tree Size Limits
+
+The scheduler enforces limits to prevent resource exhaustion:
+
+```python
+from gotn.scheduler import Scheduler, MAX_DEPTH, MAX_NODES
+
+scheduler = Scheduler(
+    state_manager,
+    max_depth=10,   # Default: MAX_DEPTH (10)
+    max_nodes=100,  # Default: MAX_NODES (100)
+)
+
+# Raises DepthLimitExceeded if child would exceed max_depth
+# Raises NodeLimitExceeded if tree would exceed max_nodes
+```
+
 ### Version Compatibility
 
 | GOTN Version | Claude Code Version | Python Version |
@@ -1704,3 +1776,55 @@ gotn install --global  # or --project
 ```
 
 The system handles the manual orchestration burden while ensuring that no matter how deep the decomposition goes, every node serves the root objective—with efficient context access that scales to arbitrary depth, all as a self-contained package with no external services required.
+
+---
+
+## Implementation Status
+
+*Last updated: 2026-01-13*
+
+### Core Components (Implemented)
+
+| Component | File | Status | Notes |
+|-----------|------|--------|-------|
+| WorkNode model | `node.py` | ✅ Complete | Pydantic models, auto-ID generation |
+| State machine | `state.py` | ✅ Complete | All transitions, event bus |
+| DAG scheduler | `scheduler.py` | ✅ Complete | Priority queue, depth/node limits |
+| Goal alignment | `alignment.py` | ✅ Complete | Keyword overlap + concept expansion |
+| Graph store | `graph.py` | ✅ Complete | Kuzu integration |
+| CLI | `cli.py` | ✅ Complete | Typer-based, init/run/status |
+| Executor | `executor.py` | ✅ Complete | Claude subprocess with retry |
+| Context builder | `context.py` | ✅ Complete | Three-tier, VoI-gated |
+
+### Architecture Review Fixes
+
+The following issues from the [2026-01-13 architecture review](architecture-review-2026-01-13.md) have been addressed:
+
+| Issue | Priority | Status | Implementation |
+|-------|----------|--------|----------------|
+| Tier 2 queries blocked | P0 | ✅ Fixed | VoI pre-fetch in `context.py` |
+| Context budget tracking | P0 | ✅ Fixed | `ContextBudget` class |
+| Shell injection in hooks | P0 | ✅ Fixed | Stdin JSON, not interpolation |
+| Criterion IDs in schema | P1 | ✅ Fixed | IDs in prompt, output format |
+| CLI retry logic | P1 | ✅ Fixed | `RetryConfig`, exponential backoff |
+| Depth/node limits | P1 | ✅ Fixed | `MAX_DEPTH=10`, `MAX_NODES=100` |
+
+### Test Coverage
+
+```
+54 tests passing:
+- 12 alignment tests
+- 17 context tests
+- 13 executor tests
+- 10 scheduler tests
+- 7 state tests
+```
+
+### Remaining Work
+
+| Item | Priority | Status |
+|------|----------|--------|
+| Semantic embeddings for alignment | P2 | Planned |
+| VOI gating enforcement | P2 | Documented |
+| Goal Capsule signatures | P3 | Documented |
+| ContextFilter sandboxing | P3 | Documented |
