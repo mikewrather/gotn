@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from gotn.graph import GraphStore
 from gotn.node import NodeStatus, WorkNode
 
 
@@ -144,43 +145,30 @@ class NodeEventBus:
 
 
 class StateManager:
-    """Manages WorkNode persistence and state transitions."""
+    """Manages WorkNode persistence and state transitions using graph storage."""
 
     def __init__(self, store_path: Path):
         self.store_path = store_path
-        self.nodes: dict[str, WorkNode] = {}
+        self.graph = GraphStore(store_path)
         self.event_bus = NodeEventBus()
-        self._ensure_store()
-
-    def _ensure_store(self):
-        """Ensure store directories exist."""
-        (self.store_path / "nodes").mkdir(parents=True, exist_ok=True)
-        (self.store_path / "evidence").mkdir(parents=True, exist_ok=True)
-        (self.store_path / "cache").mkdir(parents=True, exist_ok=True)
 
     def load_node(self, node_id: str) -> WorkNode:
         """Load a node from the store."""
-        if node_id in self.nodes:
-            return self.nodes[node_id]
-
-        node = WorkNode.load(self.store_path, node_id)
-        self.nodes[node_id] = node
+        node = self.graph.load_node(node_id)
+        if node is None:
+            raise FileNotFoundError(f"Node not found: {node_id}")
         return node
 
     def save_node(self, node: WorkNode) -> None:
         """Save a node to the store."""
-        node.updated_at = datetime.now()
-        node.save(self.store_path)
-        self.nodes[node.id] = node
+        self.graph.save_node(node)
 
     def create_node(self, node: WorkNode) -> WorkNode:
         """Create and persist a new node."""
-        self.save_node(node)
-        return node
+        return self.graph.create_node(node)
 
     def transition(self, node: WorkNode, event: str) -> WorkNode:
         """Apply a state transition to a node."""
-        old_status = node.status
         new_status = STATE_MACHINE.transition(node, event)
 
         node.status = new_status
@@ -199,66 +187,58 @@ class StateManager:
 
         return node
 
+    def get_all_nodes(self) -> list[WorkNode]:
+        """Get all nodes from the store."""
+        return self.graph.get_all_nodes()
+
     def load_all_nodes(self) -> dict[str, WorkNode]:
-        """Load all nodes from the store."""
-        nodes_dir = self.store_path / "nodes"
-        for path in nodes_dir.glob("*.yaml"):
-            node_id = path.stem
-            if node_id not in self.nodes:
-                self.load_node(node_id)
-        return self.nodes
+        """Load all nodes as a dict (for backwards compatibility)."""
+        nodes = self.get_all_nodes()
+        return {n.id: n for n in nodes}
 
     def get_ready_nodes(self) -> list[WorkNode]:
         """Get all nodes in READY state."""
-        self.load_all_nodes()
-        return [n for n in self.nodes.values() if n.status == NodeStatus.READY]
+        return self.graph.get_ready_nodes()
 
     def get_running_nodes(self) -> list[WorkNode]:
         """Get all nodes in RUNNING state."""
-        self.load_all_nodes()
-        return [n for n in self.nodes.values() if n.status == NodeStatus.RUNNING]
+        return self.graph.get_running_nodes()
 
     def get_blocked_nodes(self) -> list[WorkNode]:
         """Get all nodes in BLOCKED state."""
-        self.load_all_nodes()
-        return [n for n in self.nodes.values() if n.status == NodeStatus.BLOCKED]
+        return self.graph.get_blocked_nodes()
 
     def get_root_nodes(self) -> list[WorkNode]:
         """Get all root nodes (no parent)."""
-        self.load_all_nodes()
-        return [n for n in self.nodes.values() if n.parent is None]
+        return self.graph.get_root_nodes()
 
     def get_children(self, node: WorkNode) -> list[WorkNode]:
         """Get all child nodes."""
-        return [self.load_node(child_id) for child_id in node.children]
+        return self.graph.get_children(node.id)
 
     def get_parent(self, node: WorkNode) -> Optional[WorkNode]:
         """Get parent node if exists."""
-        if node.parent:
-            return self.load_node(node.parent)
-        return None
+        return self.graph.get_parent(node.id)
+
+    def get_ancestors(self, node: WorkNode) -> list[WorkNode]:
+        """Get all ancestors from root to immediate parent."""
+        return self.graph.get_ancestors(node.id)
+
+    def get_descendants(self, node: WorkNode) -> list[WorkNode]:
+        """Get all descendants of a node."""
+        return self.graph.get_descendants(node.id)
 
     def check_dependencies_met(self, node: WorkNode) -> bool:
         """Check if all dependencies are satisfied."""
-        for dep_id in node.get_dependencies():
-            try:
-                dep = self.load_node(dep_id)
-                if dep.status not in (NodeStatus.COMPLETE, NodeStatus.DEGRADED):
-                    return False
-            except FileNotFoundError:
-                return False
-        return True
+        return self.graph.check_dependencies_met(node.id)
 
     def check_all_children_terminal(self, node: WorkNode) -> bool:
         """Check if all children are in terminal state."""
-        for child_id in node.children:
-            try:
-                child = self.load_node(child_id)
-                if not child.status.is_terminal:
-                    return False
-            except FileNotFoundError:
-                return False
-        return True
+        return self.graph.check_all_children_terminal(node.id)
+
+    def get_context_fingerprint(self, node: WorkNode) -> str:
+        """Get context fingerprint for cache keying."""
+        return self.graph.get_context_fingerprint(node.id)
 
     def cascade_cancel(self, node: WorkNode) -> list[WorkNode]:
         """Cancel a node and all its descendants."""
@@ -268,11 +248,11 @@ class StateManager:
             self.transition(node, "cancel")
             cancelled.append(node)
 
-        for child_id in node.children:
-            try:
-                child = self.load_node(child_id)
-                cancelled.extend(self.cascade_cancel(child))
-            except FileNotFoundError:
-                pass
+        for child in self.get_children(node):
+            cancelled.extend(self.cascade_cancel(child))
 
         return cancelled
+
+    def close(self):
+        """Close the underlying graph store."""
+        self.graph.close()

@@ -265,6 +265,112 @@ Each spawn is validated for alignment. Each completion rolls up confidence. The 
 
 ---
 
+## Dual Recursion: Task + Data
+
+GOTN supports two orthogonal recursion modes that can be composed:
+
+### Task Recursion (GOTN-Style)
+
+Traditional goal decomposition: a WorkNode spawns child WorkNodes.
+
+```
+WorkNode (Research TTS)
+  ├── spawn → WorkNode (Evaluate ElevenLabs)
+  ├── spawn → WorkNode (Evaluate Google TTS)
+  └── spawn → WorkNode (Evaluate Azure)
+
+Parent BLOCKED until children complete
+Results aggregated via confidence model
+Each child is a separate execution context
+```
+
+**Use for**: Goal decomposition, heterogeneous sub-tasks, explicit contracts.
+
+### Data Recursion (RLM-Style)
+
+Process large data within a single node via recursive self-calls on segments.
+
+```
+WorkNode (Analyze 50 research papers)
+  │
+  ├── segment_call(papers[0:10]) → claims[]
+  ├── segment_call(papers[10:20]) → claims[]
+  ├── segment_call(papers[20:30]) → claims[]
+  ├── segment_call(papers[30:40]) → claims[]
+  └── segment_call(papers[40:50]) → claims[]
+  │
+  └── aggregate(all_claims) → final_output
+
+Same node identity throughout
+Shared environment/store across calls
+No child WorkNodes spawned (cheaper)
+```
+
+**Use for**: Homogeneous data processing, when spawning nodes is overhead.
+
+### Composition: Hybrid Patterns
+
+The two modes compose naturally:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Task Node: Research TTS Options                             │
+│   └── Uses data recursion internally to process 50 papers  │
+│       └── Writes claims to shared store                     │
+│                                                             │
+│ Task Node: Decision - Select TTS Provider                   │
+│   └── Queries claims from store (Tier 2)                    │
+│   └── Runs ContextFilter to score options vs constraints    │
+│   └── Outputs: Commitment to ElevenLabs                     │
+│                                                             │
+│ Task Node: Implementation - Build TTS Integration           │
+│   └── Queries decision + constraints (Tier 2)               │
+│   └── Uses data recursion for large codebase analysis       │
+│   └── Outputs: Working integration                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### When to Use Which
+
+| Pattern | Characteristics | Example |
+|---------|-----------------|---------|
+| Task Recursion | Different goals, explicit contracts, need isolation | Research → Decision → Build |
+| Data Recursion | Same operation on segments, shared context, cheap | Analyze 50 papers, process log files |
+| Hybrid | Task decomposition with data-heavy sub-tasks | Research node internally uses data recursion |
+
+### Implementation
+
+Data recursion is implemented as a **segment processor mode** on WorkNode:
+
+```python
+class WorkNode:
+    # ... existing fields ...
+
+    # Data recursion support
+    segment_mode: bool = False
+    segment_schema: Optional[str] = None  # Expected output format
+    aggregation_fn: Optional[str] = None  # How to combine results
+
+def execute_with_data_recursion(node: WorkNode, data: list, chunk_size: int = 10):
+    """Execute node with RLM-style data recursion."""
+    claims = []
+
+    for i in range(0, len(data), chunk_size):
+        chunk = data[i:i + chunk_size]
+
+        # Same node, different data segment
+        result = execute_segment(node, chunk)
+        claims.extend(result.claims)
+
+        # Write to shared store immediately
+        graph.save_claims(node.id, result.claims)
+
+    # Aggregate all claims
+    return aggregate_claims(claims, node.aggregation_fn)
+```
+
+---
+
 ## The Four Node Types
 
 All nodes have the same structure, but differ in what they produce:
@@ -295,20 +401,152 @@ A node at depth 5 needs context, but passing the entire tree would explode the c
 
 **The tension**: Alignment patches imperfectly articulated sub-goals. Every sub-goal is imperfectly articulated (natural language is lossy), so deeper nodes need MORE ancestor context to stay aligned, but have LESS budget to spend on it.
 
-### Context Budget Model
+### Hybrid Context Strategy: RLM + GOTN
 
-Each node gets a total context budget (e.g., 8000 tokens). This is allocated across components:
+Traditional approaches stuff all context into the prompt upfront. This wastes tokens on information that may not be needed and limits recursion depth.
+
+GOTN uses a **hybrid approach** inspired by Recursive Language Models (RLM):
+
+1. **Eager (Tier 1)**: Always-present alignment-critical context
+2. **Query (Tier 2)**: On-demand access to graph via tools
+3. **Lazy (Tier 3)**: External fetches only when gaps detected
+
+```
+┌────────────────────────────────────────────────────────┐
+│ TIER 1: ALWAYS STUFFED (5-8% budget)                   │
+│   • Goal Capsule (immutable root goal + constraints)   │
+│   • Immediate parent goal + key constraint             │
+│   • Production anchor reference                        │
+│   Why: Prevents drift, always available                │
+├────────────────────────────────────────────────────────┤
+│ TIER 2: QUERY INTERFACE (Tools)                        │
+│   • Full ancestor context via graph queries            │
+│   • Sibling node outputs (completed peers)             │
+│   • Evidence store with semantic search                │
+│   • Cached research claims                             │
+│   Why: Cheaper than stuffing, allows deep recursion    │
+├────────────────────────────────────────────────────────┤
+│ TIER 3: ON-DEMAND EXTERNAL (Lazy Fetch)                │
+│   • Web search / documentation                         │
+│   • Code analysis                                      │
+│   • External API calls                                 │
+│   Why: Only when gaps detected                         │
+└────────────────────────────────────────────────────────┘
+```
+
+### When to Use Which Tier
+
+| Scenario | Tier | Rationale |
+|----------|------|-----------|
+| Root goal + must-pass constraints | Tier 1 | Alignment-critical, always needed |
+| Parent goal + immediate context | Tier 1 | Task relevance, always needed |
+| Grandparent+ ancestry | Tier 2 | Query when confidence < threshold |
+| Sibling research findings | Tier 2 | Query when synthesizing |
+| External documentation | Tier 3 | Only when gaps identified |
+
+### Goal Capsule
+
+The **Goal Capsule** is an immutable, checksummed object that anchors alignment:
+
+```yaml
+GoalCapsule:
+  id: "capsule-abc123"
+  root_goal: "Build NES story content generation system"
+  constraints:
+    - "Age-appropriate for 3-8 years"
+    - "Budget under $0.01/minute for TTS"
+  success_criteria:
+    - "Working story generation pipeline"
+    - "Content passes quality review"
+  checksum: "sha256:a1b2c3..."  # Tamper detection
+```
+
+**Every node must**:
+1. Reference a Goal Capsule at spawn time
+2. Validate capsule checksum before output
+3. Include capsule ID in completion report
+
+If the checksum mismatches, execution halts—the goal has drifted.
+
+### VoI-Gated Retrieval
+
+When should a node query Tier 2 instead of proceeding with Tier 1 only?
+
+Use **Value of Information (VoI) gating**:
+
+```
+query_tier2 = (uncertainty × decision_impact) / query_cost > threshold
+
+Where:
+  uncertainty = 1 - confidence
+  decision_impact = ancestor_depth_weight × contract_criticality
+  query_cost = estimated_tokens + latency_penalty
+```
+
+**Triggers for mandatory Tier 2 retrieval**:
+- Confidence < 0.7 on any must-pass criterion
+- Contract constraint unresolved
+- Parent explicitly requires ancestor context
+
+### ContextFilter: Code-Based Pre-Processing
+
+Before LLM reasoning, nodes can run **deterministic code filters** on retrieved data. This is inspired by RLM's Python REPL approach.
+
+```python
+class ContextFilter:
+    """Code-based pre-processing for retrieved context."""
+
+    def __init__(self, filter_code: str, timeout_ms: int = 1000):
+        self.code = filter_code
+        self.timeout = timeout_ms
+        self.env = {"re": re, "json": json}  # Safe subset
+
+    def apply(self, raw_context: dict) -> dict:
+        """Execute filter code on retrieved data."""
+        # Sandboxed execution - no filesystem/network
+        exec(self.code, self.env, {"ctx": raw_context})
+        return self.env.get("result", raw_context)
+```
+
+**Example filter for an implementation node**:
+
+```python
+# Attached to instrumental node - runs before LLM prompt
+result = {
+    # Only committed decisions, not exploratory research
+    "decisions": [c for c in ctx["claims"] if "committed:" in c["scope"]],
+
+    # Only configuration constraints from ancestors
+    "constraints": [c for c in ctx["ancestor_claims"]
+                    if c["domain"] == "configuration"],
+
+    # Just the API spec, not the full research
+    "api_specs": ctx.get("artifacts", {}).get("api_design"),
+}
+```
+
+**Benefits**:
+- 10x cheaper than LLM token consumption
+- Deterministic, reproducible filtering
+- Reduces noise before semantic processing
+
+### Context Budget Model (Updated)
+
+With the hybrid approach, the budget shifts:
 
 ```
 ┌─────────────────────────────────────────────────┐
 │ CONTEXT BUDGET (100%)                           │
 ├─────────────────────────────────────────────────┤
-│ Goal Chain (Ancestry)      20%   ~1600 tokens   │
-│ Work Context              55%   ~4400 tokens   │
-│ Evidence/Claims           15%   ~1200 tokens   │
-│ Inherited Constraints     10%   ~800 tokens    │
+│ Tier 1 (Goal Capsule + Parent)  8%   ~640 tk    │
+│ Work Context                   60%   ~4800 tk   │
+│ Query Tool Responses (Tier 2)  20%   ~1600 tk   │
+│ Filter Script Output           7%    ~560 tk    │
+│ Reserved for Output            5%    ~400 tk    │
 └─────────────────────────────────────────────────┘
 ```
+
+The 20% previously allocated to ancestor chain is now available for work context, with ancestors accessed on-demand via Tier 2 queries.
 
 ### Ancestor Allocation with Decay
 
@@ -642,7 +880,17 @@ GOTN's data model is naturally a graph - nodes with typed relationships, ancestr
 ### Schema
 
 ```cypher
--- Node types
+-- Core node types
+CREATE NODE TABLE GoalCapsule(
+    id STRING,
+    root_goal STRING,
+    constraints STRING[],       -- Must-pass constraints
+    success_criteria STRING[],  -- Top-level success criteria
+    checksum STRING,            -- SHA256 for tamper detection
+    created_at TIMESTAMP,
+    PRIMARY KEY(id)
+)
+
 CREATE NODE TABLE WorkNode(
     id STRING,
     goal STRING,
@@ -650,7 +898,22 @@ CREATE NODE TABLE WorkNode(
     status STRING,        -- pending, ready, running, blocked, complete, etc.
     depth INT64,
     confidence DOUBLE,
+    capsule_ref STRING,   -- Reference to GoalCapsule
+    context_policy STRING, -- JSON: tier1_budget, tier2_enabled, filter_script
+    contract STRING,       -- JSON: inputs, outputs, invariants
+    segment_mode BOOL,     -- Data recursion enabled
     data STRING,          -- Full node JSON for complex fields
+    created_at TIMESTAMP,
+    PRIMARY KEY(id)
+)
+
+CREATE NODE TABLE Claim(
+    id STRING,
+    proposition STRING,
+    confidence DOUBLE,
+    domain STRING,        -- api_documentation, configuration, experiment, etc.
+    scope STRING,         -- global, committed:decision-id, etc.
+    source_node STRING,
     created_at TIMESTAMP,
     PRIMARY KEY(id)
 )
@@ -658,6 +921,7 @@ CREATE NODE TABLE WorkNode(
 CREATE NODE TABLE Evidence(
     id STRING,
     content STRING,
+    summary STRING,       -- For Tier 2 queries
     domain STRING,        -- technical, contextual, user_provided
     strength DOUBLE,
     created_at TIMESTAMP,
@@ -669,8 +933,36 @@ CREATE REL TABLE PARENT(FROM WorkNode TO WorkNode)
 CREATE REL TABLE SPAWNED_BY(FROM WorkNode TO WorkNode)
 CREATE REL TABLE DEPENDS_ON(FROM WorkNode TO WorkNode)
 CREATE REL TABLE ENABLES(FROM WorkNode TO WorkNode)
+CREATE REL TABLE HAS_CAPSULE(FROM WorkNode TO GoalCapsule)
+CREATE REL TABLE HAS_CLAIM(FROM WorkNode TO Claim)
 CREATE REL TABLE HAS_EVIDENCE(FROM WorkNode TO Evidence)
+CREATE REL TABLE SUPPORTS(FROM Evidence TO Claim)
 CREATE REL TABLE ANCHORED_TO(FROM WorkNode TO WorkNode)  -- production_anchor
+```
+
+### Tier 2 Query Tools
+
+Nodes access the graph via these tool functions (exposed during execution):
+
+```python
+# Query tools available to executing nodes
+def query_ancestors(depth_limit: int = None) -> list[GoalSummary]:
+    """Fetch ancestor goals and constraints."""
+
+def query_claims(domain: str = None, min_confidence: float = 0.5) -> list[Claim]:
+    """Fetch relevant claims from ancestor nodes."""
+
+def query_decisions() -> list[Commitment]:
+    """Fetch all committed decisions in ancestry."""
+
+def query_sibling_outputs(status: str = "complete") -> list[Output]:
+    """Fetch outputs from sibling nodes."""
+
+def search_evidence(query: str, limit: int = 10) -> list[Evidence]:
+    """Semantic search over evidence store."""
+
+def get_goal_capsule() -> GoalCapsule:
+    """Get the immutable goal capsule for this tree."""
 ```
 
 ### Key Queries
@@ -830,13 +1122,32 @@ Given that alignment, confidence, and recursion are all essential:
 
 ## Summary
 
-**GOTN is a recursive orchestration system where:**
+**GOTN is a recursive orchestration system combining goal-oriented task networks with RLM-inspired context efficiency:**
+
+### Core Principles
 
 1. **Goals decompose recursively** - Each level can spawn children as needed
 2. **Every level has the same structure** - Self-similar nodes all the way down
-3. **Alignment is automatic** - Children validate against full ancestry before spawning
+3. **Alignment is automatic** - Children validate against Goal Capsule before spawning
 4. **Confidence gates progress** - Nodes complete when they have "enough"
 5. **Constraints propagate** - Must-pass criteria cascade to all descendants
-6. **Context is compressed** - Goal chains keep context manageable at depth
 
-The system handles the manual orchestration burden while ensuring that no matter how deep the decomposition goes, every node serves the root objective.
+### Context Efficiency (RLM Synthesis)
+
+6. **Three-tier context** - Eager (Tier 1) + Query (Tier 2) + Lazy (Tier 3)
+7. **Goal Capsule anchoring** - Immutable, checksummed root goal prevents drift
+8. **Code-based filtering** - ContextFilter scripts reduce token consumption 10x
+9. **Dual recursion** - Task recursion for goals, data recursion for large datasets
+10. **VoI-gated retrieval** - Query Tier 2 only when value exceeds cost
+
+### Trade-off Summary
+
+| Scenario | Strategy |
+|----------|----------|
+| Alignment-critical context | Tier 1 (always stuff) |
+| Ancestor research | Tier 2 (query on demand) |
+| External documentation | Tier 3 (lazy fetch) |
+| 50+ papers to analyze | Data recursion (no child nodes) |
+| Research → Decision → Build | Task recursion (explicit contracts) |
+
+The system handles the manual orchestration burden while ensuring that no matter how deep the decomposition goes, every node serves the root objective—with efficient context access that scales to arbitrary depth.

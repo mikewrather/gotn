@@ -139,9 +139,9 @@ class Scheduler:
 
         # Check if any blocked parents can now resume
         unblocked = []
-        all_nodes = self.state.load_all_nodes()
+        all_nodes = self.state.get_all_nodes()
 
-        for potential_parent in all_nodes.values():
+        for potential_parent in all_nodes:
             if potential_parent.status != NodeStatus.BLOCKED:
                 continue
             if node.id not in potential_parent.children:
@@ -353,9 +353,9 @@ class Scheduler:
         Returns the number of nodes transitioned to ready.
         """
         count = 0
-        all_nodes = self.state.load_all_nodes()
+        all_nodes = self.state.get_all_nodes()
 
-        for node in all_nodes.values():
+        for node in all_nodes:
             if node.status != NodeStatus.PENDING:
                 continue
 
@@ -368,12 +368,12 @@ class Scheduler:
 
     def get_stats(self) -> dict:
         """Get scheduler statistics."""
-        all_nodes = self.state.load_all_nodes()
+        all_nodes = self.state.get_all_nodes()
 
         status_counts = defaultdict(int)
         mode_counts = defaultdict(int)
 
-        for node in all_nodes.values():
+        for node in all_nodes:
             status_counts[node.status.value] += 1
             mode_counts[node.mode.value] += 1
 
