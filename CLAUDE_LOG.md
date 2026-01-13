@@ -113,3 +113,50 @@ $ gotn run --store /tmp/test2 --no-skills
 - Test child node spawning workflow
 - Test decision mode
 - Add integration tests for full execution
+
+## 2026-01-13: Claude Code Integration Architecture
+
+### Research Completed
+- **Skills**: Folder-based workflows with SKILL.md, auto/manual invocation
+- **Subagents**: Mode-specific specialists via Task tool, tool restrictions
+- **Hooks**: PreToolUse, PostToolUse, SubagentStop lifecycle events
+- **MCP**: Considered and rejected for Tier 2 queries (too heavy)
+- **Plugin Marketplace**: Distribution via GitHub/npm
+
+### Key Design Decisions
+
+1. **CLI over MCP** for Tier 2 queries
+   - `gotn query ancestors/claims/siblings` commands
+   - Token-budget-aware output (`--max-tokens`)
+   - No external process to manage
+
+2. **`--json-schema` for structured output**
+   - Claude uses internal StructuredOutput tool
+   - Guaranteed schema compliance
+   - No more YAML parsing from freeform text
+
+3. **Self-contained package**
+   - `pip install gotn && gotn install --global`
+   - Skills, agents, hooks bundled
+   - Plugin manifest for marketplace
+
+### Architecture Documentation Updated
+- `docs/architecture.md` now includes:
+  - Complete Claude Code integration section
+  - CLI invocation patterns with all flags
+  - GOTN_OUTPUT_SCHEMA definition
+  - Skills/Subagents/Hooks specifications
+  - Packaging and distribution guide
+  - Environment variables for context
+
+### Sources
+- [Claude Code Skills Docs](https://code.claude.com/docs/en/skills)
+- [Claude Code Hooks Docs](https://code.claude.com/docs/en/hooks)
+- [Claude Code Subagents Docs](https://code.claude.com/docs/en/sub-agents)
+- [Anthropic Skills Repo](https://github.com/anthropics/skills)
+
+### Next Steps
+- Refactor executor.py to use `--json-schema`
+- Create skills/ and agents/ directories with actual files
+- Implement `gotn query` subcommands
+- Implement `gotn install` command
