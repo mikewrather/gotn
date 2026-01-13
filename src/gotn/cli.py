@@ -229,26 +229,21 @@ def run(
 
     # Show final status (unless dry-run)
     if not dry_run:
-        status(store=store)
+        _status_impl(store=store)
 
 
-@app.command()
-def status(
-    tree: bool = typer.Option(False, "--tree", "-t", help="Show full DAG tree"),
-    node_id: Optional[str] = typer.Option(
-        None, "--node", "-n", help="Show details for specific node"
-    ),
-    store: Optional[Path] = typer.Option(
-        None, "--store", "-s", help="Path to store directory"
-    ),
+def _status_impl(
+    store: Optional[Path] = None,
+    tree: bool = False,
+    node_id: Optional[str] = None,
 ):
-    """Show status of the goal tree."""
+    """Internal status implementation (can be called from other commands)."""
     state = get_state_manager(store)
     all_nodes = state.load_all_nodes()
 
     if not all_nodes:
         console.print("[yellow]No nodes found[/yellow]")
-        raise typer.Exit(0)
+        return
 
     if node_id:
         try:
@@ -263,6 +258,20 @@ def status(
         _show_tree(state, all_nodes)
     else:
         _show_table(all_nodes)
+
+
+@app.command()
+def status(
+    tree: bool = typer.Option(False, "--tree", "-t", help="Show full DAG tree"),
+    node_id: Optional[str] = typer.Option(
+        None, "--node", "-n", help="Show details for specific node"
+    ),
+    store: Optional[Path] = typer.Option(
+        None, "--store", "-s", help="Path to store directory"
+    ),
+):
+    """Show status of the goal tree."""
+    _status_impl(store=store, tree=tree, node_id=node_id)
 
 
 def _show_table(nodes: dict[str, WorkNode]):

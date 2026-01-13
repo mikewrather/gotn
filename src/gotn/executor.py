@@ -570,13 +570,31 @@ def apply_result_to_node(node: WorkNode, result: NodeResult) -> None:
     node.resource_usage.steps += 1
     node.resource_usage.last_updated = datetime.now()
 
-    # Update criterion confidence
-    for status in result.criterion_status:
-        for criterion in node.goal.acceptance_criteria:
+    # Update criterion confidence with flexible ID matching
+    criteria = node.goal.acceptance_criteria
+    statuses = result.criterion_status
+
+    for i, status in enumerate(statuses):
+        matched = False
+
+        # First try exact ID match
+        for criterion in criteria:
             if criterion.id == status.id:
                 criterion.satisfied = status.satisfied
                 criterion.confidence = status.confidence
+                matched = True
                 break
+
+        # If no exact match and single criterion, apply to it
+        if not matched and len(criteria) == 1:
+            criteria[0].satisfied = status.satisfied
+            criteria[0].confidence = status.confidence
+            matched = True
+
+        # If no exact match, try positional matching
+        if not matched and i < len(criteria):
+            criteria[i].satisfied = status.satisfied
+            criteria[i].confidence = status.confidence
 
     # Update aggregated confidence
     _update_aggregated_confidence(node)

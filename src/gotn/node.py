@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 import yaml
 from nanoid import generate
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def generate_id(prefix: str = "node") -> str:
@@ -191,6 +191,19 @@ class Claim(BaseModel):
     scope: str = Field(default="global")
     domain: ClaimDomain = ClaimDomain.GENERAL
 
+    @field_validator("domain", mode="before")
+    @classmethod
+    def validate_domain(cls, v):
+        """Handle unknown domain values gracefully."""
+        if isinstance(v, ClaimDomain):
+            return v
+        if isinstance(v, str):
+            try:
+                return ClaimDomain(v)
+            except ValueError:
+                return ClaimDomain.GENERAL
+        return ClaimDomain.GENERAL
+
 
 class Evidence(BaseModel):
     """Supporting material for claims and decisions."""
@@ -328,16 +341,18 @@ class KnowledgeOutput(BaseModel):
     type: str = "knowledge"
     claims: list[Claim] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
-    summary: str
+    summary: str = ""
+    content: Optional[str] = None  # Alternative field name Claude might use
 
 
 class ArtifactOutput(BaseModel):
     """Output from instrumental nodes."""
 
     type: str = "artifact"
-    path: str
-    artifact_type: str
-    hash: str
+    path: Optional[str] = None
+    artifact_type: Optional[str] = None
+    hash: Optional[str] = None
+    content: Optional[str] = None  # For inline content without file path
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -345,12 +360,12 @@ class CommitmentOutput(BaseModel):
     """Output from decision nodes."""
 
     type: str = "commitment"
-    choice_set: list[str]
-    selected: str
-    rationale: str
+    choice_set: list[str] = Field(default_factory=list)
+    selected: Optional[str] = None
+    rationale: str = ""
     constraints: dict[str, Any] = Field(default_factory=dict)
     residual_risks: list[str] = Field(default_factory=list)
-    rollback_plan: str
+    rollback_plan: str = ""
     assumption_ledger: list[Assumption] = Field(default_factory=list)
 
 
