@@ -78,3 +78,38 @@ The alignment system solves the "goal drift" problem where deep subtasks lose si
 - Add `ContextPolicy` with tier configuration
 - Create Tier 2 query tools for executor
 - Update GraphStore schema with new tables
+
+## 2026-01-12: Build & Runtime Fixes
+
+### Completed
+- **Package build verified** - `uv venv && uv pip install -e ".[dev]"` works
+- **24 tests passing** - All unit tests pass
+
+### Runtime Bug Fixes
+
+1. **CLI status() internal call** - Typer OptionInfo objects were leaking when `status()` was called internally from `run()`. Fixed by extracting `_status_impl()` helper function.
+
+2. **Claim domain validation** - Claude returns arbitrary domain strings (e.g., "mathematical_axiom") that aren't in the `ClaimDomain` enum. Added `field_validator` to default unknown values to `GENERAL`.
+
+3. **Output model flexibility** - Made output model fields optional to handle variable Claude responses:
+   - `KnowledgeOutput.summary` now defaults to empty string
+   - `ArtifactOutput.path/artifact_type/hash` now optional
+   - `CommitmentOutput` fields have sensible defaults
+
+4. **Criterion ID matching** - Claude returns generic IDs like "crit-goal-achieved" instead of actual node criterion IDs. Fixed with flexible matching: exact match → single-criterion fallback → positional matching.
+
+### Test Results
+```bash
+$ gotn init "What is 2+2?" --store /tmp/test --mode epistemic
+$ gotn run --store /tmp/test --no-skills
+# Result: complete, 100% confidence
+
+$ gotn init "List three Python web frameworks" --store /tmp/test2 --mode epistemic
+$ gotn run --store /tmp/test2 --no-skills
+# Result: complete, 95% confidence
+```
+
+### Next Steps
+- Test child node spawning workflow
+- Test decision mode
+- Add integration tests for full execution
