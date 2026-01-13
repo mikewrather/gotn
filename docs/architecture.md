@@ -839,28 +839,324 @@ This prevents discovering overflow mid-execution.
 
 ---
 
-## How It Relates to Claude Code
+## Claude Code Integration
 
-GOTN orchestrates Claude Code, not replaces it.
+GOTN is a **self-contained package** that orchestrates Claude Code via CLI. It installs globally or per-project and integrates through Claude Code's extensibility mechanisms: Skills, Subagents, Hooks, and Plugins.
+
+### Architecture Overview
 
 ```
-GOTN                          Claude Code
-─────                         ───────────
-Workflow orchestration   →    Task agents
-Alignment validation     →    (GOTN provides this)
-Confidence tracking      →    (GOTN provides this)
-Context routing          →    Skill selection
-                              Tool execution
-                              File operations
+┌─────────────────────────────────────────────────────────────────────┐
+│                         GOTN Package                                │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Python CLI (pip install gotn)                                     │
+│  ├── gotn init <goal>           # Create root node                 │
+│  ├── gotn run [--node X]        # Execute nodes                    │
+│  ├── gotn status [--json]       # Tree status                      │
+│  ├── gotn query ancestors       # Tier 2: ancestor context         │
+│  ├── gotn query claims          # Tier 2: sibling claims           │
+│  ├── gotn query siblings        # Tier 2: sibling outputs          │
+│  ├── gotn complete <node>       # Mark node complete               │
+│  └── gotn install [--global]    # Install skills/agents            │
+│                                                                     │
+│  Skills (.claude/skills/gotn/)                                     │
+│  └── SKILL.md                   # /gotn - main orchestration       │
+│                                                                     │
+│  Subagents (.claude/agents/)                                       │
+│  ├── gotn-epistemic.md          # Research execution               │
+│  ├── gotn-instrumental.md       # Build execution                  │
+│  ├── gotn-decision.md           # Decision execution               │
+│  └── gotn-validation.md         # Validation execution             │
+│                                                                     │
+│  Hooks (settings.json)                                             │
+│  ├── PreToolUse                 # Alignment validation             │
+│  └── SubagentStop               # Result aggregation               │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-Each node executes via Claude Code:
-- Epistemic nodes → deep-research skill, web search, Explore
-- Decision nodes → triad-orchestrator, analysis
-- Instrumental nodes → code tools, file operations
-- Validation nodes → test runners
+### CLI Invocation Pattern
 
-GOTN adds the meta-layer: alignment, confidence, recursion management.
+GOTN executes nodes via `claude --print` with **schema-enforced structured output**:
+
+```python
+# Core execution pattern
+cmd = [
+    "claude",
+    "--print",
+    "--output-format", "json",
+    "--json-schema", json.dumps(GOTN_OUTPUT_SCHEMA),
+    "--allowedTools", ",".join(get_tools_for_mode(node.mode)),
+    "--max-turns", str(node.budget.steps or 10),
+    "--append-system-prompt", context,
+    node.goal.statement
+]
+```
+
+**Key CLI flags:**
+
+| Flag | Purpose |
+|------|---------|
+| `--print` / `-p` | Non-interactive mode, returns result and exits |
+| `--output-format json` | Structured JSON output with message types |
+| `--json-schema` | **Enforces output schema** via StructuredOutput tool |
+| `--allowedTools` | Restricts available tools per mode |
+| `--append-system-prompt` | Injects goal chain, constraints, context |
+| `--max-turns` | Limits agentic turns (budget control) |
+
+### Structured Output Schema
+
+The `--json-schema` flag guarantees response format. Claude uses an internal `StructuredOutput` tool to comply:
+
+```python
+GOTN_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "proposition": {"type": "string"},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "domain": {"type": "string"}
+                },
+                "required": ["proposition", "confidence"]
+            }
+        },
+        "criterion_status": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "satisfied": {"type": "boolean"},
+                    "confidence": {"type": "number"}
+                },
+                "required": ["satisfied", "confidence"]
+            }
+        },
+        "needs_children": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["epistemic", "decision", "instrumental", "validation"]},
+                    "rationale": {"type": "string"}
+                },
+                "required": ["goal", "mode"]
+            }
+        },
+        "output": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string"},
+                "summary": {"type": "string"},
+                "content": {"type": "string"}
+            }
+        }
+    },
+    "required": ["claims", "criterion_status"]
+}
+```
+
+**Result parsing:**
+
+```python
+def parse_claude_result(stdout: str) -> NodeResult:
+    """Parse NDJSON output from claude --print --output-format json."""
+    messages = [json.loads(line) for line in stdout.strip().split('\n')]
+
+    for msg in messages:
+        if msg.get("type") == "result":
+            return NodeResult(
+                structured_output=msg.get("structured_output"),  # Schema-validated
+                cost_usd=msg.get("total_cost_usd"),
+                usage=msg.get("usage"),
+                duration_ms=msg.get("duration_ms")
+            )
+```
+
+### Mode-Specific Tool Restrictions
+
+Each node mode gets a tailored tool set via `--allowedTools`:
+
+```python
+MODE_TOOLS = {
+    NodeMode.EPISTEMIC: [
+        "Read", "Glob", "Grep", "WebSearch", "WebFetch", "Task"
+    ],
+    NodeMode.INSTRUMENTAL: [
+        "Read", "Write", "Edit", "Bash", "Glob", "Grep"
+    ],
+    NodeMode.DECISION: [
+        "Read", "Grep", "WebSearch", "Task"  # No write tools
+    ],
+    NodeMode.VALIDATION: [
+        "Read", "Bash", "Grep", "Glob"  # Test execution only
+    ],
+}
+```
+
+### Skills
+
+Skills are Claude Code's mechanism for complex, reusable workflows. GOTN exposes a `/gotn` skill:
+
+```markdown
+<!-- .claude/skills/gotn/SKILL.md -->
+---
+name: gotn
+description: Goal-Oriented Task Network orchestration. Use when managing
+  recursive goal decomposition, research workflows, or multi-step projects
+  that need alignment tracking and confidence gating.
+---
+
+# GOTN Orchestration
+
+You are executing within the GOTN workflow system.
+
+## Commands
+
+- `gotn init "<goal>"` - Create a new goal tree
+- `gotn run` - Execute the next ready node
+- `gotn run --continuous` - Execute until blocked or complete
+- `gotn status` - Show tree status
+- `gotn status --tree` - Show full DAG structure
+
+## Tier 2 Queries (Context Retrieval)
+
+When you need additional context beyond what's in your prompt:
+
+- `gotn query ancestors` - Get ancestor goals and constraints
+- `gotn query claims --domain X` - Get research claims from siblings
+- `gotn query siblings` - Get outputs from completed peer nodes
+
+## Output Format
+
+Your response MUST include structured output matching the GOTN schema.
+The system will extract claims, criterion status, and child requests.
+```
+
+### Subagents
+
+Subagents are mode-specific execution specialists spawned via the Task tool:
+
+```markdown
+<!-- .claude/agents/gotn-epistemic.md -->
+---
+name: gotn-epistemic
+description: Research specialist for GOTN epistemic nodes. Executes research
+  goals with comprehensive information gathering and claim extraction.
+tools:
+  - Read
+  - Glob
+  - Grep
+  - WebSearch
+  - WebFetch
+  - Task
+---
+
+# GOTN Epistemic Agent
+
+You are executing a GOTN epistemic (research) node.
+
+## Your Objective
+Research the given goal thoroughly, gathering evidence from multiple sources.
+
+## Context Retrieval
+If you need additional context, use bash to query the GOTN store:
+- `gotn query ancestors --format compact` - Ancestor goals
+- `gotn query claims --min-confidence 0.7` - Existing research
+
+## Output Requirements
+Your findings must be structured for the parent orchestrator:
+- Extract concrete claims with confidence scores
+- Note which acceptance criteria are satisfied
+- Identify if child research is needed
+```
+
+```markdown
+<!-- .claude/agents/gotn-instrumental.md -->
+---
+name: gotn-instrumental
+description: Build specialist for GOTN instrumental nodes. Implements
+  solutions based on committed decisions and constraints.
+tools:
+  - Read
+  - Write
+  - Edit
+  - Bash
+  - Glob
+  - Grep
+---
+
+# GOTN Instrumental Agent
+
+You are executing a GOTN instrumental (build) node.
+
+## Your Objective
+Implement the specified goal following committed decisions and constraints.
+
+## Before Building
+Query for relevant decisions and constraints:
+- `gotn query claims --scope "committed:*"` - Binding decisions
+- `gotn query ancestors --format constraints` - Must-satisfy requirements
+
+## Output Requirements
+- Document what was built
+- Confirm constraint satisfaction
+- Note any deviations or issues
+```
+
+### Hooks
+
+Hooks provide lifecycle integration without consuming context:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "command": "gotn hooks validate-alignment --tool-input \"$TOOL_INPUT\"",
+        "description": "Validate file writes align with goal constraints"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "command": "gotn hooks track-execution --tool \"$TOOL_NAME\" --result \"$TOOL_RESULT\"",
+        "description": "Track tool execution for resource accounting"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "command": "gotn hooks aggregate-result --subagent \"$SUBAGENT_TYPE\" --result \"$SUBAGENT_RESULT\"",
+        "description": "Aggregate subagent outputs into parent node"
+      }
+    ]
+  }
+}
+```
+
+**Hook capabilities:**
+- **PreToolUse**: Validate alignment before destructive operations
+- **PostToolUse**: Track resource usage, update node state
+- **SubagentStop**: Aggregate child results, update confidence
+
+### Why Not MCP?
+
+We considered MCP servers for Tier 2 queries but rejected them:
+
+| Concern | MCP Approach | CLI Approach |
+|---------|--------------|--------------|
+| **Deployment** | Separate process to manage | Single `pip install` |
+| **Context cost** | Protocol overhead + tool schemas | Minimal - just CLI output |
+| **Control** | MCP decides response format | We control exact output size |
+| **Distribution** | Server config + startup scripts | Copy skills + agents |
+
+**CLI-backed skills achieve everything MCP can** with tighter context control—critical for a globally-installed tool.
 
 ---
 
@@ -940,29 +1236,90 @@ CREATE REL TABLE SUPPORTS(FROM Evidence TO Claim)
 CREATE REL TABLE ANCHORED_TO(FROM WorkNode TO WorkNode)  -- production_anchor
 ```
 
-### Tier 2 Query Tools
+### Tier 2 Query Commands
 
-Nodes access the graph via these tool functions (exposed during execution):
+Nodes access the graph via CLI commands (invoked via Bash during execution):
+
+```bash
+# Tier 2 queries - executed by the agent when additional context needed
+
+# Get ancestor goals and constraints
+gotn query ancestors [--depth-limit N] [--format compact|full]
+
+# Get claims from sibling/ancestor research
+gotn query claims [--domain X] [--min-confidence 0.5] [--scope "committed:*"]
+
+# Get committed decisions in ancestry
+gotn query decisions [--format summary]
+
+# Get outputs from sibling nodes
+gotn query siblings [--status complete] [--format summary]
+
+# Semantic search over evidence store
+gotn query evidence "<search query>" [--limit 10]
+
+# Get the goal capsule for this tree
+gotn query capsule
+```
+
+**Context-aware output**: Each query command respects a `--max-tokens` flag to control output size:
+
+```bash
+# Compact output for context-constrained situations
+gotn query ancestors --max-tokens 200
+
+# Full detail when budget allows
+gotn query ancestors --format full
+```
+
+**Example CLI implementations:**
 
 ```python
-# Query tools available to executing nodes
-def query_ancestors(depth_limit: int = None) -> list[GoalSummary]:
+@app.command("query")
+def query_cmd():
+    """Tier 2 context queries."""
+    pass
+
+@query_cmd.command("ancestors")
+def query_ancestors(
+    depth_limit: Optional[int] = None,
+    format: str = "compact",
+    max_tokens: int = 500,
+    node: Optional[str] = None,  # Defaults to current node from env
+):
     """Fetch ancestor goals and constraints."""
+    store = get_graph_store()
+    node_id = node or os.environ.get("GOTN_CURRENT_NODE")
 
-def query_claims(domain: str = None, min_confidence: float = 0.5) -> list[Claim]:
-    """Fetch relevant claims from ancestor nodes."""
+    ancestors = store.get_ancestors(node_id)
 
-def query_decisions() -> list[Commitment]:
-    """Fetch all committed decisions in ancestry."""
+    if format == "compact":
+        # Summarize to fit token budget
+        output = summarize_ancestors(ancestors, max_tokens)
+    else:
+        output = [a.to_dict() for a in ancestors]
 
-def query_sibling_outputs(status: str = "complete") -> list[Output]:
-    """Fetch outputs from sibling nodes."""
+    console.print_json(data=output)
 
-def search_evidence(query: str, limit: int = 10) -> list[Evidence]:
-    """Semantic search over evidence store."""
+@query_cmd.command("claims")
+def query_claims(
+    domain: Optional[str] = None,
+    min_confidence: float = 0.5,
+    scope: Optional[str] = None,
+    max_tokens: int = 500,
+):
+    """Fetch relevant claims from the evidence store."""
+    store = get_graph_store()
 
-def get_goal_capsule() -> GoalCapsule:
-    """Get the immutable goal capsule for this tree."""
+    claims = store.query_claims(
+        domain=domain,
+        min_confidence=min_confidence,
+        scope_pattern=scope,
+    )
+
+    # Truncate to fit token budget
+    output = truncate_to_tokens(claims, max_tokens)
+    console.print_json(data=output)
 ```
 
 ### Key Queries
@@ -1120,9 +1477,169 @@ Given that alignment, confidence, and recursion are all essential:
 
 ---
 
+## Packaging and Distribution
+
+GOTN is distributed as a **self-contained Python package** with Claude Code integration assets.
+
+### Package Structure
+
+```
+gotn/
+├── pyproject.toml              # Package configuration
+├── src/
+│   └── gotn/                   # Python package
+│       ├── __init__.py
+│       ├── cli.py              # Typer CLI (gotn command)
+│       ├── node.py             # WorkNode models
+│       ├── state.py            # State machine
+│       ├── scheduler.py        # DAG scheduling
+│       ├── executor.py         # Claude subprocess execution
+│       ├── graph.py            # Kuzu graph store
+│       ├── confidence.py       # Aggregation logic
+│       ├── alignment.py        # Goal alignment checking
+│       └── hooks.py            # Hook command handlers
+├── skills/
+│   └── gotn/
+│       └── SKILL.md            # /gotn skill definition
+├── agents/
+│   ├── gotn-epistemic.md
+│   ├── gotn-instrumental.md
+│   ├── gotn-decision.md
+│   └── gotn-validation.md
+├── hooks/
+│   └── settings.json           # Hook configurations
+└── tests/
+```
+
+### Installation Methods
+
+**From PyPI (recommended):**
+```bash
+pip install gotn
+
+# Install Claude Code integration (skills, agents, hooks)
+gotn install --global     # ~/.claude/
+gotn install --project    # ./.claude/
+```
+
+**From GitHub:**
+```bash
+pip install git+https://github.com/mikewrather/gotn.git
+gotn install --global
+```
+
+**Claude Code Plugin (marketplace):**
+```bash
+# Register GOTN as a plugin marketplace
+claude plugin marketplace add mikewrather/gotn
+
+# Install the plugin
+claude plugin install gotn@gotn-plugin
+```
+
+### The `gotn install` Command
+
+```python
+@app.command("install")
+def install_integration(
+    global_: bool = typer.Option(False, "--global", "-g", help="Install to ~/.claude/"),
+    project: bool = typer.Option(False, "--project", "-p", help="Install to ./.claude/"),
+    hooks: bool = typer.Option(True, "--hooks/--no-hooks", help="Install hooks"),
+):
+    """Install GOTN skills, agents, and hooks into Claude Code."""
+    import shutil
+    from importlib.resources import files
+
+    # Determine target directory
+    if global_:
+        target = Path.home() / ".claude"
+    elif project:
+        target = Path.cwd() / ".claude"
+    else:
+        # Default to project if .claude exists, otherwise global
+        target = Path.cwd() / ".claude" if (Path.cwd() / ".claude").exists() else Path.home() / ".claude"
+
+    target.mkdir(parents=True, exist_ok=True)
+
+    # Copy skills
+    skills_src = files("gotn").joinpath("../skills")
+    skills_dst = target / "skills"
+    shutil.copytree(skills_src, skills_dst / "gotn", dirs_exist_ok=True)
+
+    # Copy agents
+    agents_src = files("gotn").joinpath("../agents")
+    agents_dst = target / "agents"
+    for agent_file in agents_src.iterdir():
+        shutil.copy(agent_file, agents_dst / agent_file.name)
+
+    # Merge hooks into settings.json
+    if hooks:
+        merge_hooks_config(target / "settings.json")
+
+    console.print(f"[green]GOTN installed to {target}[/green]")
+```
+
+### Plugin Manifest
+
+For Claude Code plugin marketplace distribution:
+
+```json
+// .claude-plugin/plugin.json
+{
+  "name": "gotn",
+  "version": "0.1.0",
+  "description": "Goal-Oriented Task Network orchestration for recursive goal decomposition",
+  "author": "mikewrather",
+  "homepage": "https://github.com/mikewrather/gotn",
+  "skills": ["gotn"],
+  "agents": [
+    "gotn-epistemic",
+    "gotn-instrumental",
+    "gotn-decision",
+    "gotn-validation"
+  ],
+  "commands": {
+    "postinstall": "pip install gotn && gotn install --project"
+  }
+}
+```
+
+### Environment Variables
+
+GOTN uses environment variables for execution context:
+
+| Variable | Purpose |
+|----------|---------|
+| `GOTN_STORE` | Path to graph database (default: `./store`) |
+| `GOTN_CURRENT_NODE` | ID of currently executing node |
+| `GOTN_CURRENT_TREE` | ID of current goal tree |
+| `GOTN_CAPSULE_ID` | ID of active goal capsule |
+
+These are set by the executor before invoking Claude:
+
+```python
+env = os.environ.copy()
+env["GOTN_STORE"] = str(self.store_path)
+env["GOTN_CURRENT_NODE"] = node.id
+env["GOTN_CURRENT_TREE"] = node.production_anchor or node.id
+env["GOTN_CAPSULE_ID"] = node.capsule_ref
+
+subprocess.run(cmd, env=env, ...)
+```
+
+### Version Compatibility
+
+| GOTN Version | Claude Code Version | Python Version |
+|--------------|---------------------|----------------|
+| 0.1.x | 2.0+ | 3.10+ |
+
+The `--json-schema` flag requires Claude Code 2.0+. Earlier versions fall back to YAML parsing.
+
+---
+
 ## Summary
 
-**GOTN is a recursive orchestration system combining goal-oriented task networks with RLM-inspired context efficiency:**
+**GOTN is a self-contained, CLI-backed orchestration system for Claude Code** that enables recursive goal decomposition with alignment tracking and confidence gating.
 
 ### Core Principles
 
@@ -1140,14 +1657,32 @@ Given that alignment, confidence, and recursion are all essential:
 9. **Dual recursion** - Task recursion for goals, data recursion for large datasets
 10. **VoI-gated retrieval** - Query Tier 2 only when value exceeds cost
 
+### Claude Code Integration
+
+11. **Schema-enforced output** - `--json-schema` guarantees structured responses
+12. **Mode-specific tools** - `--allowedTools` restricts tools per node type
+13. **Skills for orchestration** - `/gotn` skill provides workflow entry point
+14. **Subagents for execution** - Mode-specific specialists (epistemic, instrumental, etc.)
+15. **Hooks for lifecycle** - PreToolUse validation, PostToolUse tracking
+16. **CLI-backed queries** - Tier 2 via `gotn query` commands (no MCP overhead)
+
 ### Trade-off Summary
 
 | Scenario | Strategy |
 |----------|----------|
 | Alignment-critical context | Tier 1 (always stuff) |
-| Ancestor research | Tier 2 (query on demand) |
+| Ancestor research | Tier 2 (`gotn query ancestors`) |
 | External documentation | Tier 3 (lazy fetch) |
 | 50+ papers to analyze | Data recursion (no child nodes) |
 | Research → Decision → Build | Task recursion (explicit contracts) |
+| Structured responses | `--json-schema` (not YAML parsing) |
+| Tool management | MCP avoided; CLI-backed skills |
 
-The system handles the manual orchestration burden while ensuring that no matter how deep the decomposition goes, every node serves the root objective—with efficient context access that scales to arbitrary depth.
+### Installation
+
+```bash
+pip install gotn
+gotn install --global  # or --project
+```
+
+The system handles the manual orchestration burden while ensuring that no matter how deep the decomposition goes, every node serves the root objective—with efficient context access that scales to arbitrary depth, all as a self-contained package with no external services required.
