@@ -370,8 +370,8 @@ class CommitmentOutput(BaseModel):
     constraints: list[str] | dict[str, Any] = Field(default_factory=list)
     residual_risks: list[str] = Field(default_factory=list)
     rollback_plan: str = ""
-    # Accept both simple strings and full Assumption objects
-    assumption_ledger: list[str | Assumption] = Field(default_factory=list)
+    # Accept strings, Assumption objects, or dicts with any assumption-related fields
+    assumption_ledger: list[str | Assumption | dict[str, Any]] = Field(default_factory=list)
 
 
 class ValidationOutput(BaseModel):

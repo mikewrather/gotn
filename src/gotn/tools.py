@@ -241,47 +241,33 @@ def get_tool_instructions(mode: NodeMode) -> str:
 
 
 def should_use_deep_research(goal: str, mode: NodeMode) -> bool:
-    """Determine if deep research skill should be used."""
+    """Determine if deep research skill should be used.
+
+    NOTE: Deep research is disabled by default because it typically takes
+    10+ minutes and times out. Enable only for truly comprehensive research
+    needs by explicitly requesting it in the goal.
+    """
     if mode != NodeMode.EPISTEMIC:
         return False
 
-    # Keywords that suggest comprehensive research is needed
-    research_keywords = [
-        "research",
-        "investigate",
-        "compare",
-        "analyze",
-        "evaluate",
-        "understand",
-        "comprehensive",
-        "thorough",
-        "best practices",
-        "state of the art",
-        "options for",
-        "alternatives",
-    ]
-
+    # Only use deep research if explicitly requested
+    # The skill takes 10+ minutes and often times out
     goal_lower = goal.lower()
-    return any(kw in goal_lower for kw in research_keywords)
+    explicit_request = "deep research" in goal_lower or "comprehensive research" in goal_lower
+
+    return explicit_request
 
 
 def should_use_triad(goal: str, mode: NodeMode) -> bool:
-    """Determine if triad orchestrator should be used for decisions."""
+    """Determine if triad orchestrator should be used for decisions.
+
+    Disabled by default - triad-orchestrator skill may not be available.
+    Only enable if explicitly requested in the goal.
+    """
     if mode != NodeMode.DECISION:
         return False
 
-    # Keywords that suggest multi-perspective review is valuable
-    critical_keywords = [
-        "architecture",
-        "security",
-        "critical",
-        "important",
-        "design",
-        "strategy",
-        "framework",
-        "infrastructure",
-        "migration",
-    ]
-
+    # Only use if explicitly requested
     goal_lower = goal.lower()
-    return any(kw in goal_lower for kw in critical_keywords)
+    explicit_request = "triad" in goal_lower or "multi-model" in goal_lower
+    return explicit_request
