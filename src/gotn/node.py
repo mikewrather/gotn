@@ -392,7 +392,8 @@ class PlannedSubGoal(BaseModel):
     goal_statement: str = Field(min_length=10)
     mode: str  # NodeMode value as string for flexibility
     rationale: str = Field(description="Why this sub-goal is needed")
-    acceptance_criteria: list[dict[str, Any]] = Field(default_factory=list)
+    # Accept both string (simple) and dict (detailed) formats from LLM
+    acceptance_criteria: list[str | dict[str, Any]] = Field(default_factory=list)
     depends_on: list[int] = Field(
         default_factory=list,
         description="Indices of other sub-goals this depends on",
@@ -416,7 +417,8 @@ class PlanOutput(BaseModel):
         default_factory=list,
         description="Suggested order of sub-goal execution (indices)",
     )
-    parallel_groups: list[list[int]] = Field(
+    # Accept both simple list[int] and detailed dict formats from LLM
+    parallel_groups: list[list[int] | dict[str, Any]] = Field(
         default_factory=list,
         description="Groups of sub-goals that can run in parallel",
     )
