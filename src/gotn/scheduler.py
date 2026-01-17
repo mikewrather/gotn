@@ -9,6 +9,7 @@ from typing import Callable, Optional
 from gotn.alignment import AlignmentMonitor, propagate_constraints
 from gotn.node import EdgeType, NodeMode, NodeStatus, TypedEdge, WorkNode
 from gotn.state import StateManager
+from gotn.workflow import WorkflowContext, WorkflowStateMachine, TransitionResult
 
 
 # Default limits for tree size
@@ -73,9 +74,10 @@ class Scheduler:
     # Priority by mode (lower = higher priority)
     MODE_PRIORITY = {
         NodeMode.DECISION: 0,  # Decisions unblock the most work
-        NodeMode.INSTRUMENTAL: 1,  # Building produces artifacts
-        NodeMode.VALIDATION: 2,  # Verification after build
-        NodeMode.EPISTEMIC: 3,  # Research can wait
+        NodeMode.PLANNING: 1,  # Planning enables parallel execution
+        NodeMode.INSTRUMENTAL: 2,  # Building produces artifacts
+        NodeMode.VALIDATION: 3,  # Verification after build
+        NodeMode.EPISTEMIC: 4,  # Research can wait
     }
 
     def __init__(
@@ -85,6 +87,7 @@ class Scheduler:
         on_node_complete: Optional[Callable[[WorkNode], None]] = None,
         alignment_threshold: float = 0.3,
         enforce_alignment: bool = True,
+        enforce_workflow: bool = True,
         max_depth: int = MAX_DEPTH,
         max_nodes: int = MAX_NODES,
     ):
@@ -94,12 +97,14 @@ class Scheduler:
         self._priority_queue: list[PriorityItem] = []
         self._on_node_complete = on_node_complete
         self.enforce_alignment = enforce_alignment
+        self.enforce_workflow = enforce_workflow
         self.max_depth = max_depth
         self.max_nodes = max_nodes
         self.alignment_monitor = AlignmentMonitor(
             load_node_fn=state.load_node,
             alignment_threshold=alignment_threshold,
         )
+        self.workflow_machine = WorkflowStateMachine()
 
     def _compute_priority(self, node: WorkNode) -> int:
         """Compute scheduling priority for a node.
@@ -247,6 +252,19 @@ class Scheduler:
                     f"Suggestions: {'; '.join(result.suggestions)}"
                 )
 
+        # Check workflow preconditions
+        if self.enforce_workflow:
+            workflow_result = self._check_workflow_preconditions(parent, mode)
+            if not workflow_result.allowed:
+                if workflow_result.suggested_mode:
+                    raise ValueError(
+                        f"Workflow precondition not met: {workflow_result.reason}. "
+                        f"Suggested mode: {workflow_result.suggested_mode.value}"
+                    )
+                raise ValueError(
+                    f"Workflow precondition not met: {workflow_result.reason}"
+                )
+
         # Create default criteria if not provided
         if criteria is None:
             criteria = [
@@ -258,6 +276,7 @@ class Scheduler:
 
         # Map mode to deliverable type
         deliverable_map = {
+            NodeMode.PLANNING: DeliverableType.PLAN,
             NodeMode.EPISTEMIC: DeliverableType.KNOWLEDGE,
             NodeMode.INSTRUMENTAL: DeliverableType.ARTIFACT,
             NodeMode.DECISION: DeliverableType.COMMITMENT,
@@ -430,3 +449,102 @@ class Scheduler:
             "by_status": dict(status_counts),
             "by_mode": dict(mode_counts),
         }
+
+    def _check_workflow_preconditions(
+        self, parent: WorkNode, target_mode: NodeMode
+    ) -> TransitionResult:
+        """Check if workflow preconditions are met for spawning a child.
+
+        Builds a WorkflowContext from the parent node and checks if the
+        target mode's preconditions are satisfied.
+        """
+        from gotn.node import (
+            ArtifactOutput,
+            CommitmentOutput,
+            KnowledgeOutput,
+            PlanOutput,
+        )
+
+        # Gather claims from parent and siblings
+        sibling_claims = []
+        for output in parent.outputs:
+            if isinstance(output, KnowledgeOutput):
+                sibling_claims.extend(output.claims)
+        sibling_claims.extend(parent.claims)
+
+        # Check for commitment in parent's outputs
+        has_commitment = any(
+            isinstance(o, CommitmentOutput) for o in parent.outputs
+        )
+
+        # Check for plan in parent's outputs
+        has_plan = any(isinstance(o, PlanOutput) for o in parent.outputs)
+
+        # Check for artifact in parent's outputs
+        has_artifact = any(isinstance(o, ArtifactOutput) for o in parent.outputs)
+
+        # Estimate goal complexity
+        complexity, _ = self.workflow_machine.estimate_complexity(
+            parent.goal.statement
+        )
+
+        # Build context
+        context = WorkflowContext(
+            node=parent,
+            parent_node=None,  # We don't have grandparent context
+            sibling_claims=sibling_claims,
+            has_commitment=has_commitment,
+            has_plan=has_plan,
+            has_artifact=has_artifact,
+            goal_complexity=complexity,
+        )
+
+        return self.workflow_machine.check_preconditions(target_mode, context)
+
+    def suggest_child_mode(self, parent: WorkNode) -> NodeMode:
+        """Suggest the appropriate mode for a child node based on workflow state.
+
+        Args:
+            parent: The parent node
+
+        Returns:
+            Suggested NodeMode for the child
+        """
+        from gotn.node import (
+            ArtifactOutput,
+            CommitmentOutput,
+            KnowledgeOutput,
+            PlanOutput,
+        )
+
+        # Check what outputs we have
+        has_claims = bool(parent.claims) or any(
+            isinstance(o, KnowledgeOutput) and o.claims for o in parent.outputs
+        )
+        has_commitment = any(
+            isinstance(o, CommitmentOutput) for o in parent.outputs
+        )
+        has_plan = any(isinstance(o, PlanOutput) for o in parent.outputs)
+        has_artifact = any(isinstance(o, ArtifactOutput) for o in parent.outputs)
+
+        # Determine suggested mode based on workflow state
+        if has_artifact:
+            return NodeMode.VALIDATION
+        if has_plan:
+            return NodeMode.INSTRUMENTAL
+        if has_commitment:
+            # Check complexity to decide between planning and instrumental
+            if self.workflow_machine.should_use_planning(
+                WorkflowContext(
+                    node=parent,
+                    has_commitment=True,
+                    goal_complexity=self.workflow_machine.estimate_complexity(
+                        parent.goal.statement
+                    )[0],
+                )
+            ):
+                return NodeMode.PLANNING
+            return NodeMode.INSTRUMENTAL
+        if has_claims:
+            return NodeMode.DECISION
+        return NodeMode.EPISTEMIC

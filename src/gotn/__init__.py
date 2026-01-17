@@ -15,6 +15,15 @@ from gotn.node import (
     Evidence,
     NodeStatus,
     NodeMode,
+    PlanOutput,
+    PlannedSubGoal,
+)
+from gotn.workflow import (
+    WorkflowStateMachine,
+    WorkflowState,
+    WorkflowContext,
+    TransitionResult,
+    classify_and_route,
 )
 
 __all__ = [
@@ -27,4 +36,11 @@ __all__ = [
     "Evidence",
     "NodeStatus",
     "NodeMode",
+    "PlanOutput",
+    "PlannedSubGoal",
+    "WorkflowStateMachine",
+    "WorkflowState",
+    "WorkflowContext",
+    "TransitionResult",
+    "classify_and_route",
 ]

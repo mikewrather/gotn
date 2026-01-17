@@ -323,3 +323,52 @@ DEFAULT_BACKOFF_FACTOR = 2.0
 - `context-management.md` - Context budget and VoI (Python)
 - `graph-store.md` - Kuzu integration (Cypher, Python)
 - `llm-integration.md` - Claude Code integration (Skills, CLI)
+
+## 2026-01-17: Planning Mode & Workflow State Machine
+
+### Completed
+- **NodeMode.PLANNING** added to node.py for explicit goal decomposition
+- **DeliverableType.PLAN** added for planning node outputs
+
+- **New data models** (`src/gotn/node.py`):
+  - `PlannedSubGoal` - Sub-goal with mode, rationale, dependencies, complexity
+  - `PlanOutput` - Full planning output with sub_goals, execution_order, parallel_groups, critical_path
+
+- **WorkflowStateMachine** (`src/gotn/workflow.py`):
+  - Goal classification (UNCERTAIN → INFORMED → DECIDED → PLANNED → BUILDING → VALIDATING)
+  - Complexity estimation (simple/moderate/complex based on keyword signals)
+  - Mode precondition checking (has_claims, has_commitment, has_direction, has_artifact)
+  - Valid transition enforcement (epistemic→decision→planning/instrumental→validation)
+  - Entry mode selection based on goal keywords
+
+- **Scheduler integration** (`src/gotn/scheduler.py`):
+  - `enforce_workflow` parameter for precondition checking
+  - `_check_workflow_preconditions()` builds context and validates transitions
+  - `suggest_child_mode()` recommends next mode based on workflow state
+  - PLANNING added to MODE_PRIORITY (priority 1, after DECISION)
+
+- **Executor updates** (`src/gotn/executor.py`):
+  - PlanOutput handling in `apply_result_to_node()`
+  - Output type "plan" added to prompt format
+
+- **Planning prompt template** (`src/prompts/planning.md`):
+  - Goal decomposition instructions
+  - Mode selection guide
+  - Plan output format with sub-goals and dependencies
+
+### Test Results
+- 27 new workflow tests (all passing)
+- 133 total tests passing
+
+### Architecture
+The workflow state machine enforces proper mode sequencing:
+1. **UNCERTAIN** goals → EPISTEMIC (research to gather claims)
+2. **INFORMED** (have claims) → DECISION (choose approach)
+3. **DECIDED** (have commitment) → PLANNING (complex) or INSTRUMENTAL (simple)
+4. **PLANNED** (have plan) → spawn INSTRUMENTAL children
+5. **BUILDING** (have artifacts) → VALIDATION
+
+This prevents:
+- Making decisions without evidence
+- Building without clear direction
+- Validating non-existent artifacts

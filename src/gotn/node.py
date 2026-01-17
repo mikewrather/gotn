@@ -43,19 +43,21 @@ class NodeStatus(str, Enum):
 class NodeMode(str, Enum):
     """WorkNode execution mode."""
 
-    EPISTEMIC = "epistemic"
-    INSTRUMENTAL = "instrumental"
-    DECISION = "decision"
-    VALIDATION = "validation"
+    PLANNING = "planning"  # Decompose complex goals into sub-goals
+    EPISTEMIC = "epistemic"  # Acquire knowledge, reduce uncertainty
+    DECISION = "decision"  # Make binding choices based on evidence
+    INSTRUMENTAL = "instrumental"  # Produce artifacts (code, content)
+    VALIDATION = "validation"  # Verify artifacts or claims
 
 
 class DeliverableType(str, Enum):
     """Type of output the node produces."""
 
-    KNOWLEDGE = "knowledge"
-    ARTIFACT = "artifact"
-    COMMITMENT = "commitment"
-    VERIFICATION = "verification"
+    PLAN = "plan"  # Decomposition into sub-goals
+    KNOWLEDGE = "knowledge"  # Claims and evidence
+    COMMITMENT = "commitment"  # Binding decision
+    ARTIFACT = "artifact"  # Code, content, config
+    VERIFICATION = "verification"  # Pass/fail result
 
 
 class CriterionType(str, Enum):
@@ -178,6 +180,7 @@ class ResourceUsage(BaseModel):
     cost_dollars: float = Field(default=0.0, ge=0.0)
     started_at: Optional[datetime] = None
     last_updated: datetime = Field(default_factory=datetime.now)
+    log_file: Optional[str] = None  # Path to execution log file
 
 
 class Claim(BaseModel):
@@ -363,10 +366,12 @@ class CommitmentOutput(BaseModel):
     choice_set: list[str] = Field(default_factory=list)
     selected: Optional[str] = None
     rationale: str = ""
-    constraints: dict[str, Any] = Field(default_factory=dict)
+    # Accept both list (simple) and dict (detailed) formats
+    constraints: list[str] | dict[str, Any] = Field(default_factory=list)
     residual_risks: list[str] = Field(default_factory=list)
     rollback_plan: str = ""
-    assumption_ledger: list[Assumption] = Field(default_factory=list)
+    # Accept both simple strings and full Assumption objects
+    assumption_ledger: list[str | Assumption] = Field(default_factory=list)
 
 
 class ValidationOutput(BaseModel):
@@ -381,7 +386,47 @@ class ValidationOutput(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
 
 
-Output = KnowledgeOutput | ArtifactOutput | CommitmentOutput | ValidationOutput
+class PlannedSubGoal(BaseModel):
+    """A sub-goal identified during planning."""
+
+    goal_statement: str = Field(min_length=10)
+    mode: str  # NodeMode value as string for flexibility
+    rationale: str = Field(description="Why this sub-goal is needed")
+    acceptance_criteria: list[dict[str, Any]] = Field(default_factory=list)
+    depends_on: list[int] = Field(
+        default_factory=list,
+        description="Indices of other sub-goals this depends on",
+    )
+    estimated_complexity: str = Field(
+        default="medium",
+        description="low, medium, high - affects budget allocation",
+    )
+
+
+class PlanOutput(BaseModel):
+    """Output from planning nodes."""
+
+    type: str = "plan"
+    sub_goals: list[PlannedSubGoal] = Field(default_factory=list)
+    decomposition_rationale: str = Field(
+        default="",
+        description="Why the goal was decomposed this way",
+    )
+    execution_order: list[int] = Field(
+        default_factory=list,
+        description="Suggested order of sub-goal execution (indices)",
+    )
+    parallel_groups: list[list[int]] = Field(
+        default_factory=list,
+        description="Groups of sub-goals that can run in parallel",
+    )
+    critical_path: list[int] = Field(
+        default_factory=list,
+        description="Indices of sub-goals on the critical path",
+    )
+
+
+Output = KnowledgeOutput | ArtifactOutput | CommitmentOutput | ValidationOutput | PlanOutput
 
 
 class WorkNode(BaseModel):
@@ -474,6 +519,7 @@ class WorkNode(BaseModel):
             ]
 
         deliverable_map = {
+            NodeMode.PLANNING: DeliverableType.PLAN,
             NodeMode.EPISTEMIC: DeliverableType.KNOWLEDGE,
             NodeMode.INSTRUMENTAL: DeliverableType.ARTIFACT,
             NodeMode.DECISION: DeliverableType.COMMITMENT,

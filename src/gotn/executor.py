@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -129,6 +130,25 @@ class CriterionStatus:
 
 
 @dataclass
+class BudgetExpansionRequest:
+    """Request to expand execution budget.
+
+    When Claude needs more turns to complete a task, it can request
+    a budget expansion. This requires human approval before continuing.
+    """
+
+    current_turns: int
+    requested_additional: int
+    justification: str
+    estimated_completion_confidence: float
+    progress_summary: Optional[str] = None
+
+    @property
+    def total_requested(self) -> int:
+        return self.current_turns + self.requested_additional
+
+
+@dataclass
 class NodeResult:
     """Result of executing a node."""
 
@@ -141,6 +161,9 @@ class NodeResult:
     tokens_used: int = 0
     time_ms: int = 0
     error: Optional[str] = None
+    log_file: Optional[str] = None  # Path to execution log file
+    budget_request: Optional[BudgetExpansionRequest] = None  # Budget expansion needed
+    needs_budget_approval: bool = False  # True if execution paused for budget
 
 
 @dataclass
@@ -372,7 +395,7 @@ needs_children:  # Only if blocked and need sub-work
     rationale: "Need more information about X"
 
 output:  # Only if complete
-  type: knowledge|artifact|commitment|verification
+  type: knowledge|artifact|commitment|verification|plan
   # ... type-specific fields
 ```
 """
@@ -396,15 +419,118 @@ class ClaudeExecutor:
         self,
         prompts_dir: Optional[Path] = None,
         claude_path: str = "claude",
-        default_timeout_ms: int = 120000,
+        default_timeout_ms: int = 600000,  # 10 minutes
         prefer_skills: bool = True,
         retry_config: Optional[RetryConfig] = None,
+        store_path: Optional[Path] = None,
+        use_budget_hook: bool = True,
     ):
         self.prompt_builder = PromptBuilder(prompts_dir)
         self.claude_path = claude_path
         self.default_timeout_ms = default_timeout_ms
         self.prefer_skills = prefer_skills
         self.retry_config = retry_config or RetryConfig()
+        self.store_path = store_path or Path("store")
+        self.logs_dir = self.store_path / "logs"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.use_budget_hook = use_budget_hook
+        self.budget_state_dir = self.store_path / "budget_states"
+        self.budget_state_dir.mkdir(parents=True, exist_ok=True)
+
+    def _init_budget_state(self, node: WorkNode) -> Path:
+        """Initialize budget tracking state for a node execution."""
+        state_file = self.budget_state_dir / f"{node.id}_budget.json"
+        max_turns = node.budget.steps or 50  # Default to 50 turns
+        checkpoint_at = max(1, max_turns - 2)  # Checkpoint 2 turns before limit
+
+        state = {
+            "turn_count": 0,
+            "budget_turns": max_turns,
+            "checkpoint_at": checkpoint_at,
+            "node_id": node.id,
+            "goal": node.goal.statement,
+            "checkpointed": False,
+            "progress_summary": None,
+            "created_at": datetime.now().isoformat(),
+        }
+        state_file.write_text(json.dumps(state, indent=2))
+        return state_file
+
+    def _get_budget_env(self, node: WorkNode) -> dict[str, str]:
+        """Get environment variables for budget tracking."""
+        state_file = self._init_budget_state(node)
+        return {
+            "GOTN_EXECUTION": "1",
+            "GOTN_BUDGET_STATE": str(state_file),
+            "GOTN_NODE_ID": node.id,
+        }
+
+    def _parse_budget_request(self, output: str) -> Optional[BudgetExpansionRequest]:
+        """Parse budget expansion request from Claude's output."""
+        # Look for budget_request YAML block
+        yaml_blocks = self._extract_yaml_blocks(output)
+
+        for block in yaml_blocks:
+            try:
+                data = yaml.safe_load(block)
+                if not isinstance(data, dict):
+                    continue
+
+                if "budget_request" in data:
+                    req = data["budget_request"]
+                    return BudgetExpansionRequest(
+                        current_turns=int(req.get("current_turns", 0)),
+                        requested_additional=int(req.get("requested_additional", 10)),
+                        justification=str(req.get("justification", "")),
+                        estimated_completion_confidence=float(
+                            req.get("estimated_completion_confidence", 0.5)
+                        ),
+                        progress_summary=req.get("progress_summary"),
+                    )
+            except (yaml.YAMLError, KeyError, ValueError):
+                continue
+
+        return None
+
+    def _write_log(
+        self,
+        node: WorkNode,
+        strategy: "ExecutionStrategy",
+        raw_output: str,
+        error: Optional[str] = None,
+        time_ms: int = 0,
+    ) -> str:
+        """Write execution log and return log file path."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"{node.id}_{timestamp}.log"
+        log_path = self.logs_dir / log_filename
+
+        with open(log_path, "w") as f:
+            f.write(f"=" * 80 + "\n")
+            f.write(f"GOTN Execution Log\n")
+            f.write(f"=" * 80 + "\n\n")
+            f.write(f"Node ID: {node.id}\n")
+            f.write(f"Mode: {node.mode.value}\n")
+            f.write(f"Goal: {node.goal.statement}\n")
+            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            f.write(f"Duration: {time_ms}ms\n")
+            f.write(f"\n")
+            f.write(f"Strategy:\n")
+            f.write(f"  Use Skill: {strategy.use_skill}\n")
+            if strategy.skill_name:
+                f.write(f"  Skill: {strategy.skill_name}\n")
+                f.write(f"  Args: {strategy.skill_args}\n")
+            f.write(f"  Reason: {strategy.reason}\n")
+            f.write(f"\n")
+            if error:
+                f.write(f"ERROR: {error}\n")
+                f.write(f"\n")
+            f.write(f"=" * 80 + "\n")
+            f.write(f"OUTPUT\n")
+            f.write(f"=" * 80 + "\n\n")
+            f.write(raw_output)
+
+        return str(log_path)
 
     def determine_strategy(
         self,
@@ -448,6 +574,8 @@ class ClaudeExecutor:
         """Execute a single node using Claude.
 
         Automatically determines the best execution strategy (skill vs prompt).
+        If budget is exhausted during execution, returns with needs_budget_approval=True
+        and a budget_request for human approval.
         """
         start_time = datetime.now()
 
@@ -459,9 +587,14 @@ class ClaudeExecutor:
         remaining_ms = timeout_ms - node.resource_usage.time_ms
         timeout_seconds = max(1, remaining_ms / 1000)
 
-        # Calculate max turns from step budget
-        max_turns = node.budget.steps or 10
-        remaining_turns = max_turns - node.resource_usage.steps
+        # Calculate max turns - use budget.steps as soft limit for checkpointing
+        # but allow higher hard limit to avoid premature termination
+        soft_limit = node.budget.steps or 20
+        remaining_soft = soft_limit - node.resource_usage.steps
+        hard_limit = max(remaining_soft + 10, 50)  # Always allow some runway
+
+        # Get budget tracking environment
+        budget_env = self._get_budget_env(node) if self.use_budget_hook else {}
 
         # Execute based on strategy
         try:
@@ -470,35 +603,75 @@ class ClaudeExecutor:
                     skill_name=strategy.skill_name,
                     skill_args=strategy.skill_args or "",
                     timeout_seconds=timeout_seconds,
+                    env_vars=budget_env,
                 )
             else:
                 raw_output, tokens_used = self._run_claude(
                     prompt=strategy.prompt or "",
                     timeout_seconds=timeout_seconds,
-                    max_turns=remaining_turns,
+                    max_turns=hard_limit,
+                    soft_limit=remaining_soft,
+                    env_vars=budget_env,
                 )
         except subprocess.TimeoutExpired:
             elapsed_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            error_msg = "Execution timed out"
+            log_file = self._write_log(node, strategy, "", error_msg, elapsed_ms)
             return NodeResult(
-                error="Execution timed out",
+                error=error_msg,
                 time_ms=elapsed_ms,
                 raw_output="",
+                log_file=log_file,
             )
         except subprocess.CalledProcessError as e:
             elapsed_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            # Check if this was a max-turns termination
+            stdout = e.stdout or ""
+            if "Reached max turns" in stdout or "max turns" in (e.stderr or "").lower():
+                # Max turns hit - check for budget request in output
+                budget_req = self._parse_budget_request(stdout)
+                log_file = self._write_log(node, strategy, stdout, "Budget limit reached", elapsed_ms)
+                result = self._parse_result(stdout, node)
+                result.time_ms = elapsed_ms
+                result.raw_output = stdout
+                result.log_file = log_file
+                result.budget_request = budget_req or BudgetExpansionRequest(
+                    current_turns=hard_limit,
+                    requested_additional=20,
+                    justification="Task requires more turns to complete",
+                    estimated_completion_confidence=0.5,
+                )
+                result.needs_budget_approval = True
+                return result
+
+            error_msg = f"Claude execution failed: {e.stderr}"
+            log_file = self._write_log(node, strategy, stdout, error_msg, elapsed_ms)
             return NodeResult(
-                error=f"Claude execution failed: {e.stderr}",
+                error=error_msg,
                 time_ms=elapsed_ms,
-                raw_output=e.stdout or "",
+                raw_output=stdout,
+                log_file=log_file,
             )
 
         elapsed_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+
+        # Check for budget expansion request in successful output
+        budget_req = self._parse_budget_request(raw_output)
+
+        # Write execution log
+        log_file = self._write_log(node, strategy, raw_output, None, elapsed_ms)
 
         # Parse result
         result = self._parse_result(raw_output, node)
         result.time_ms = elapsed_ms
         result.tokens_used = tokens_used
         result.raw_output = raw_output
+        result.log_file = log_file
+
+        # If budget request found, flag for approval
+        if budget_req:
+            result.budget_request = budget_req
+            result.needs_budget_approval = True
 
         return result
 
@@ -507,6 +680,7 @@ class ClaudeExecutor:
         skill_name: str,
         skill_args: str,
         timeout_seconds: float,
+        env_vars: Optional[dict[str, str]] = None,
     ) -> tuple[str, int]:
         """Run a Claude Code skill with retry logic.
 
@@ -522,6 +696,11 @@ class ClaudeExecutor:
             prompt,
         ]
 
+        # Merge environment variables
+        env = os.environ.copy()
+        if env_vars:
+            env.update(env_vars)
+
         def execute():
             try:
                 result = subprocess.run(
@@ -530,6 +709,7 @@ class ClaudeExecutor:
                     text=True,
                     timeout=timeout_seconds,
                     check=True,
+                    env=env,
                 )
                 return result
             except subprocess.CalledProcessError as e:
@@ -555,19 +735,53 @@ class ClaudeExecutor:
         prompt: str,
         timeout_seconds: float,
         max_turns: int,
+        soft_limit: int = 20,
+        env_vars: Optional[dict[str, str]] = None,
     ) -> tuple[str, int]:
         """Run Claude Code subprocess with retry logic.
 
+        Args:
+            prompt: The prompt to send to Claude
+            timeout_seconds: Maximum execution time
+            max_turns: Hard limit on turns (safety net)
+            soft_limit: Soft limit - checkpoint instructions added at this point
+            env_vars: Environment variables for budget tracking
+
         Returns (output, tokens_used).
         """
+        # Inject budget checkpoint instructions into prompt
+        budget_instruction = f"""
+
+## Budget Management
+You have a soft budget of {soft_limit} turns to complete this task.
+If you're approaching the limit and haven't completed, include a budget_request:
+
+```yaml
+budget_request:
+  current_turns: <turns used so far>
+  requested_additional: <additional turns needed>
+  justification: "<brief explanation>"
+  estimated_completion_confidence: <0.0-1.0>
+  progress_summary: "<what you've accomplished>"
+```
+
+This will pause execution for human approval before continuing.
+"""
+        full_prompt = prompt + budget_instruction
+
         cmd = [
             self.claude_path,
             "--print",
             "--dangerously-skip-permissions",
             "--max-turns",
             str(max(1, max_turns)),
-            prompt,
+            full_prompt,
         ]
+
+        # Merge environment variables
+        env = os.environ.copy()
+        if env_vars:
+            env.update(env_vars)
 
         def execute():
             try:
@@ -577,6 +791,7 @@ class ClaudeExecutor:
                     text=True,
                     timeout=timeout_seconds,
                     check=True,
+                    env=env,
                 )
                 return result
             except subprocess.CalledProcessError as e:
@@ -595,7 +810,7 @@ class ClaudeExecutor:
         )
 
         # Estimate tokens (rough: ~4 chars per token)
-        tokens_used = len(prompt) // 4 + len(result.stdout) // 4
+        tokens_used = len(full_prompt) // 4 + len(result.stdout) // 4
 
         return result.stdout, tokens_used
 
@@ -796,6 +1011,8 @@ def apply_result_to_node(node: WorkNode, result: NodeResult) -> None:
     node.resource_usage.time_ms += result.time_ms
     node.resource_usage.steps += 1
     node.resource_usage.last_updated = datetime.now()
+    if result.log_file:
+        node.resource_usage.log_file = result.log_file
 
     # Update criterion confidence with flexible ID matching
     criteria = node.goal.acceptance_criteria
@@ -832,6 +1049,7 @@ def apply_result_to_node(node: WorkNode, result: NodeResult) -> None:
             ArtifactOutput,
             CommitmentOutput,
             KnowledgeOutput,
+            PlanOutput,
             ValidationOutput,
         )
 
@@ -844,6 +1062,8 @@ def apply_result_to_node(node: WorkNode, result: NodeResult) -> None:
             node.outputs.append(CommitmentOutput(**result.output))
         elif output_type == "verification":
             node.outputs.append(ValidationOutput(**result.output))
+        elif output_type == "plan":
+            node.outputs.append(PlanOutput(**result.output))
 
     # Update timestamp
     node.updated_at = datetime.now()
