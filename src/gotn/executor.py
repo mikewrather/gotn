@@ -419,7 +419,7 @@ class ClaudeExecutor:
         self,
         prompts_dir: Optional[Path] = None,
         claude_path: str = "claude",
-        default_timeout_ms: int = 600000,  # 10 minutes
+        default_timeout_ms: int = 1200000,  # 20 minutes
         prefer_skills: bool = True,
         retry_config: Optional[RetryConfig] = None,
         store_path: Optional[Path] = None,
