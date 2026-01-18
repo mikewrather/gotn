@@ -415,6 +415,25 @@ class Scheduler:
                     "type": CriterionType.KNOWLEDGE,
                 }]
 
+            # Set mode-specific budgets for earlier HITL checkpoints
+            # Validation nodes get lower step limits to trigger budget approval prompts
+            complexity = sg.estimated_complexity or "medium"
+            complexity_multiplier = {"low": 0.5, "medium": 1.0, "high": 1.5}.get(complexity, 1.0)
+
+            base_steps = {
+                NodeMode.DECISION: 10,       # Decisions should be quick
+                NodeMode.EPISTEMIC: 15,      # Research needs some turns
+                NodeMode.INSTRUMENTAL: 20,   # Building takes time
+                NodeMode.VALIDATION: 10,     # Validation should checkpoint early
+                NodeMode.PLANNING: 15,       # Planning is moderate
+            }
+            steps = int(base_steps.get(mode, 15) * complexity_multiplier)
+
+            child_budget = Budget(
+                steps=steps,
+                time_ms=int(600000 * complexity_multiplier),  # 10min base, scaled
+            )
+
             # Create child node
             child = WorkNode(
                 id=generate_id("node"),
@@ -427,7 +446,7 @@ class Scheduler:
                 parent=parent.id,
                 production_anchor=parent.production_anchor or parent.id,
                 deliverable_type=deliverable,
-                budget=Budget(),
+                budget=child_budget,
                 status=NodeStatus.PENDING,
                 edges=[
                     TypedEdge(target=parent.id, type=EdgeType.SPAWNED_BY),
