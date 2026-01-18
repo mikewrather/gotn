@@ -422,7 +422,8 @@ class PlanOutput(BaseModel):
         default_factory=list,
         description="Groups of sub-goals that can run in parallel",
     )
-    critical_path: list[int] = Field(
+    # Accept both simple list[int] and detailed dict formats from LLM
+    critical_path: list[int] | dict[str, Any] = Field(
         default_factory=list,
         description="Indices of sub-goals on the critical path",
     )
