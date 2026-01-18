@@ -372,3 +372,43 @@ This prevents:
 - Making decisions without evidence
 - Building without clear direction
 - Validating non-existent artifacts
+
+## 2026-01-17: Plan Materialization & End-to-End Execution
+
+### Completed
+- **Plan materialization** (`src/gotn/scheduler.py`):
+  - `materialize_plan()` converts PlanOutput sub-goals into executable WorkNode children
+  - Wires DEPENDS_ON edges based on `depends_on` indices in sub-goals
+  - Transitions parent to BLOCKED state, transitions children to READY when dependencies met
+  - Called automatically from CLI after planning node completes
+
+- **CommitmentOutput flexibility** (`src/gotn/node.py`):
+  - Now accepts both flat and structured formats for multi-decision scenarios
+  - `choice_set: list[str] | dict[str, list[str]]` - single or multi-category choices
+  - `selected: str | dict[str, str]` - single or multi-category selections
+  - `rollback_plan: str | dict[str, str]` - per-component rollback plans
+  - This allows LLMs to make compound decisions (e.g., tech stack: frontend + backend + database)
+
+- **Planning prompt update** (`src/prompts/planning.md`):
+  - Explicit example showing `sub_goals` array must be in `output:` section
+  - Fixed template variable issue causing KeyError
+
+- **Neo4j as source of truth** (`src/gotn/neo4j_graph.py`):
+  - Outputs now persisted via `outputs_json` property
+  - `_parse_outputs()` deserializes to typed objects on load
+
+### Test Results
+- End-to-end test with `task-app-2` project:
+  - Planning node created 7 sub-goals (decision, data model, backend, 2 frontend, 2 validation)
+  - All materialized as executable nodes with correct dependency edges
+  - Decision (92%), data model (95%), backend API (95%), both frontend views (95%) completed
+  - Validation nodes executing
+
+### Key Commits
+- `50f8dcd` - Neo4j outputs persistence
+- `372ae39` - Plan materialization and CommitmentOutput fixes
+
+### Next Steps
+- Complete validation nodes in test execution
+- Transition planning parent node to COMPLETE when all children done
+- Add progress tracking for long-running plan executions
