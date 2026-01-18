@@ -61,27 +61,52 @@ Your plan is complete when:
 - Each sub-goal has clear acceptance criteria
 - The critical path is identified
 
-### Example Plan Structure
+### Output Format
 
-```
-sub_goals:
-  - goal_statement: "Research authentication patterns for REST APIs"
-    mode: epistemic
-    rationale: "Need to understand options before deciding"
-    depends_on: []
-    estimated_complexity: medium
+**CRITICAL**: Your `output:` section MUST include the full `sub_goals` array, not just a count.
 
-  - goal_statement: "Decide on authentication approach"
-    mode: decision
-    rationale: "Must commit to approach before building"
-    depends_on: [0]
-    estimated_complexity: low
+```yaml
+claims:
+  - proposition: "..."
+    confidence: 0.85
+    domain: general
 
-  - goal_statement: "Implement authentication middleware"
-    mode: instrumental
-    rationale: "Build the chosen approach"
-    depends_on: [1]
-    estimated_complexity: high
+criterion_status:
+  - id: "crit-xxx"  # Use the actual criterion ID from the Acceptance Criteria section
+    satisfied: true
+    confidence: 0.90
+
+output:
+  type: plan
+  sub_goals:
+    - goal_statement: "Research authentication patterns for REST APIs"
+      mode: epistemic
+      rationale: "Need to understand options before deciding"
+      acceptance_criteria:
+        - "Document at least 3 approaches"
+        - "Compare pros and cons"
+      depends_on: []
+      estimated_complexity: medium
+
+    - goal_statement: "Decide on authentication approach"
+      mode: decision
+      rationale: "Must commit to approach before building"
+      acceptance_criteria:
+        - "Select approach with rationale"
+      depends_on: [0]
+      estimated_complexity: low
+
+    - goal_statement: "Implement authentication middleware"
+      mode: instrumental
+      rationale: "Build the chosen approach"
+      acceptance_criteria:
+        - "Middleware implemented and tested"
+      depends_on: [1]
+      estimated_complexity: high
+  decomposition_rationale: "Why the goal was decomposed this way"
+  execution_order: [0, 1, 2]
+  parallel_groups: [[0], [1], [2]]
+  critical_path: [0, 1, 2]
 ```
 
 {output_format}

@@ -338,6 +338,130 @@ class Scheduler:
 
         return child
 
+    def materialize_plan(self, parent: WorkNode) -> list[WorkNode]:
+        """Materialize a PlanOutput's sub-goals into executable child nodes.
+
+        Creates child nodes for each sub-goal and wires up dependency edges
+        based on the depends_on indices in the plan.
+
+        Args:
+            parent: The planning node with a PlanOutput
+
+        Returns:
+            List of created child nodes
+        """
+        from gotn.node import (
+            Budget,
+            Criterion,
+            CriterionType,
+            DeliverableType,
+            Goal,
+            PlanOutput,
+            generate_id,
+        )
+
+        # Find the PlanOutput
+        plan_output = None
+        for output in parent.outputs:
+            if isinstance(output, PlanOutput):
+                plan_output = output
+                break
+
+        if not plan_output or not plan_output.sub_goals:
+            return []
+
+        # Map mode to deliverable type
+        deliverable_map = {
+            "planning": DeliverableType.PLAN,
+            "epistemic": DeliverableType.KNOWLEDGE,
+            "instrumental": DeliverableType.ARTIFACT,
+            "decision": DeliverableType.COMMITMENT,
+            "validation": DeliverableType.VERIFICATION,
+        }
+
+        # Map mode string to NodeMode
+        mode_map = {
+            "planning": NodeMode.PLANNING,
+            "epistemic": NodeMode.EPISTEMIC,
+            "instrumental": NodeMode.INSTRUMENTAL,
+            "decision": NodeMode.DECISION,
+            "validation": NodeMode.VALIDATION,
+        }
+
+        # Create nodes for each sub-goal, tracking index -> node_id mapping
+        index_to_node: dict[int, WorkNode] = {}
+        children: list[WorkNode] = []
+
+        for i, sg in enumerate(plan_output.sub_goals):
+            mode = mode_map.get(sg.mode, NodeMode.EPISTEMIC)
+            deliverable = deliverable_map.get(sg.mode, DeliverableType.KNOWLEDGE)
+
+            # Convert acceptance_criteria to proper format
+            criteria = []
+            for ac in sg.acceptance_criteria:
+                if isinstance(ac, str):
+                    criteria.append({
+                        "description": ac,
+                        "type": CriterionType.KNOWLEDGE,
+                    })
+                elif isinstance(ac, dict):
+                    if "type" not in ac:
+                        ac["type"] = CriterionType.KNOWLEDGE
+                    criteria.append(ac)
+
+            if not criteria:
+                criteria = [{
+                    "description": "Sub-goal achieved",
+                    "type": CriterionType.KNOWLEDGE,
+                }]
+
+            # Create child node
+            child = WorkNode(
+                id=generate_id("node"),
+                depth=parent.depth + 1,
+                mode=mode,
+                goal=Goal(
+                    statement=sg.goal_statement,
+                    acceptance_criteria=[Criterion(**c) for c in criteria],
+                ),
+                parent=parent.id,
+                production_anchor=parent.production_anchor or parent.id,
+                deliverable_type=deliverable,
+                budget=Budget(),
+                status=NodeStatus.PENDING,
+                edges=[
+                    TypedEdge(target=parent.id, type=EdgeType.SPAWNED_BY),
+                ],
+            )
+
+            index_to_node[i] = child
+            children.append(child)
+            parent.children.append(child.id)
+
+        # Now add DEPENDS_ON edges based on depends_on indices
+        for i, sg in enumerate(plan_output.sub_goals):
+            child = index_to_node[i]
+            for dep_idx in sg.depends_on:
+                if dep_idx in index_to_node:
+                    dep_node = index_to_node[dep_idx]
+                    child.edges.append(
+                        TypedEdge(target=dep_node.id, type=EdgeType.DEPENDS_ON)
+                    )
+
+        # Persist all nodes
+        for child in children:
+            self.state.create_node(child)
+
+            # Check if child is ready (no dependencies or all deps met)
+            if self.state.check_dependencies_met(child):
+                self.state.transition(child, "dependencies_met")
+                self.enqueue(child)
+
+        # Save parent with updated children list
+        self.state.save_node(parent)
+
+        return children
+
     def _check_cycle(self, source_id: str, target_id: str) -> None:
         """Check if adding an edge would create a cycle.
 

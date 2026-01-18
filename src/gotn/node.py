@@ -360,16 +360,35 @@ class ArtifactOutput(BaseModel):
 
 
 class CommitmentOutput(BaseModel):
-    """Output from decision nodes."""
+    """Output from decision nodes.
+
+    Supports both single-decision format (flat) and multi-decision format (structured).
+
+    Single decision example:
+        choice_set: ["React", "Vue", "Svelte"]
+        selected: "React"
+
+    Multi-decision example:
+        choice_set:
+            frontend: ["React", "Vue", "Svelte"]
+            backend: ["FastAPI", "Express", "Rails"]
+        selected:
+            frontend: "React"
+            backend: "FastAPI"
+    """
 
     type: str = "commitment"
-    choice_set: list[str] = Field(default_factory=list)
-    selected: Optional[str] = None
+    # Accept flat list (single decision) or dict (multiple decisions)
+    choice_set: list[str] | dict[str, list[str]] = Field(default_factory=list)
+    # Accept string (single) or dict (multiple selections)
+    selected: Optional[str | dict[str, str]] = None
     rationale: str = ""
     # Accept both list (simple) and dict (detailed) formats
     constraints: list[str] | dict[str, Any] = Field(default_factory=list)
-    residual_risks: list[str] = Field(default_factory=list)
-    rollback_plan: str = ""
+    # Accept list (flat) or dict (categorized)
+    residual_risks: list[str] | dict[str, Any] = Field(default_factory=list)
+    # Accept string (single) or dict (per-component)
+    rollback_plan: str | dict[str, str] = ""
     # Accept strings, Assumption objects, or dicts with any assumption-related fields
     assumption_ledger: list[str | Assumption | dict[str, Any]] = Field(default_factory=list)
 
